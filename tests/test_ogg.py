@@ -304,79 +304,60 @@ class OggCraftingTest(unittest.TestCase):
         self.assertIsNotNone(dur)
         self.assertAlmostEqual(dur, 2.0, delta=0.5)
 
-    def test_spoof_duration_rescales_granules_monotonically(self):
-        """spoof_duration must shrink the declared duration while keeping every
-        granule monotonic (no unsigned-underflow 'duration too long' risk)."""
-        data = self._read(self.opus_path)
-        patched, info = ogg_util.spoof_duration(data, FAKE_SECONDS)
-
-        pages = ogg_util.parse_pages(patched)
-        for page in pages:
-            self.assertTrue(ogg_util.page_crc_valid(patched, page))
-
-        granules = [p.granule for p in pages if p.granule >= 0]
-        self.assertTrue(all(a <= b for a, b in zip(granules, granules[1:])),
-                        "granules must stay monotonic after the rescale")
-        self.assertLessEqual(granules[-1], int(round(48000 * FAKE_SECONDS)))
-        self.assertAlmostEqual(info["declared_seconds"], FAKE_SECONDS, delta=0.05)
-        self.assertGreater(info["actual_seconds"], TONE_SECONDS * 0.9)
-
-        # Page bodies/lacing are untouched; only granule + CRC fields changed.
-        for old, new in zip(ogg_util.parse_pages(data), pages):
-            self.assertEqual(old.lacing, new.lacing)
-            self.assertEqual(old.body_size, new.body_size)
-
-        # Fake duration must be shorter than the real audio.
-        with self.assertRaises(ValueError):
-            ogg_util.spoof_duration(data, TONE_SECONDS + 10)
-
-    def test_spoof_method_fools_scanners_but_keeps_full_song(self):
-        """Spoof method: Roblox sees the short target in BOTH the metadata and
-        the decoded duration (what its upload check measures), while the full
-        song survives inside, restorable via PlaybackSpeed."""
-        out_path = os.path.join(self.tmpdir.name, "tone_spoof.ogg")
-        res = pipeline.craft(self.wav_path, output_path=out_path, method="spoof",
+    def test_chunked_method_splits_song_into_uploadable_chunks(self):
+        """Chunked method: the song is split into consecutive chunk files that
+        are each genuinely under the per-chunk limit, with a playlist script."""
+        out_path = os.path.join(self.tmpdir.name, "chunks", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="chunked",
                              fake_seconds=2.0, log=lambda _: None)
-        self.assertTrue(os.path.isfile(out_path))
-        self.assertAlmostEqual(res.declared_seconds, 2.0, delta=0.5)
-        self.assertAlmostEqual(res.actual_seconds, TONE_SECONDS, delta=0.5)
-        self.assertIn("PlaybackSpeed", res.in_game_script)
-        self.assertIn("sound:Play()", res.in_game_script)
+        # 6s song at ~2s chunks -> at least 3 chunks
+        self.assertGreaterEqual(len(res.chunk_paths), 3)
+        self.assertGreater(res.actual_seconds, TONE_SECONDS * 0.9)
+        self.assertAlmostEqual(res.declared_seconds, 2.0, delta=0.1)
 
-        # Metadata scan sees the fake duration.
-        probed = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
-        self.assertIsNotNone(probed)
-        self.assertAlmostEqual(probed, 2.0, delta=0.5)
+        total = 0.0
+        for p in res.chunk_paths:
+            self.assertTrue(os.path.isfile(p), f"missing chunk {p}")
+            stem = os.path.splitext(os.path.basename(p))[0]
+            self.assertLessEqual(len(stem), pipeline.MAX_ASSET_NAME_LENGTH)
+            # Metadata scan: under the 2s chunk limit...
+            probed = ffmpeg_util.probe_duration(self.ffmpeg, p)
+            self.assertIsNotNone(probed)
+            self.assertLessEqual(probed, 2.0)
+            # ...and the decoded duration (what Roblox measures) too.
+            decoded = ffmpeg_util.decode_duration(self.ffmpeg, p)
+            self.assertLessEqual(decoded, 2.0)
+            total += decoded
+            report = ogg_util.describe(self._read(p))
+            self.assertTrue(report["all_crcs_valid"])
+            self.assertEqual(report["chained_streams"], 1)
 
-        # Full decode - what Roblox's upload validation measures - must ALSO
-        # be short; this is the fix for "audio duration too long".
-        decoded = ffmpeg_util.decode_duration(self.ffmpeg, out_path)
-        self.assertLess(decoded, 3.0)
+        # No audio lost: the chunks tile the whole song.
+        self.assertAlmostEqual(total, TONE_SECONDS, delta=0.5)
 
-        report = ogg_util.describe(self._read(out_path))
-        self.assertTrue(report["granules_monotonic"])
-        self.assertTrue(report["all_crcs_valid"])
+        # The playlist script references every chunk file.
+        self.assertIn("CHUNK_IDS", res.in_game_script)
+        self.assertIn("rbxassetid://", res.in_game_script)
+        for p in res.chunk_paths:
+            self.assertIn(os.path.basename(p), res.in_game_script)
 
-    def test_spoof_method_allows_songs_longer_than_upload_limit(self):
-        """A 425s song (over the 6:59 upload limit) must pass as a ~10s asset:
-        metadata AND decoded duration stay under the 10s target, while the
-        full 425s of song content is preserved for in-game restoration."""
+    def test_chunked_method_allows_songs_longer_than_upload_limit(self):
+        """A 425s song (over the 6:59 limit) becomes chunks that are each under
+        the 6:59 per-chunk limit - the full song survives as chunk files."""
         long_wav = os.path.join(self.tmpdir.name, "long_song.wav")
         make_long_wav(long_wav, seconds=425.0)
-        out_path = os.path.join(self.tmpdir.name, "long_song_spoof.ogg")
-        res = pipeline.craft(long_wav, output_path=out_path, method="spoof",
-                             fake_seconds=10.0, log=lambda _: None)
-        # The whole song is kept - no 6:59 cap for the spoof method.
+        out_path = os.path.join(self.tmpdir.name, "chunks_long", "long.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(long_wav, output_path=out_path, method="chunked",
+                             fake_seconds=pipeline.MAX_SECONDS, log=lambda _: None)
         self.assertGreater(res.actual_seconds, pipeline.MAX_SECONDS)
-        # ...but everything Roblox measures stays under the 10s target.
-        self.assertLess(res.declared_seconds, 10.0)
-        probed = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
-        self.assertIsNotNone(probed)
-        self.assertLess(probed, 10.0)
-        decoded = ffmpeg_util.decode_duration(self.ffmpeg, out_path)
-        self.assertLess(decoded, 10.0)
-        # The in-game script restores the full song.
-        self.assertIn("PlaybackSpeed", res.in_game_script)
+        self.assertGreaterEqual(len(res.chunk_paths), 2)
+        for p in res.chunk_paths:
+            probed = ffmpeg_util.probe_duration(self.ffmpeg, p)
+            self.assertIsNotNone(probed)
+            self.assertLessEqual(probed, pipeline.MAX_SECONDS)
+            self.assertTrue(os.path.isfile(p))
 
 
 if __name__ == "__main__":

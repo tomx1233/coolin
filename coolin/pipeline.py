@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import ffmpeg as ffmpeg_util
@@ -22,14 +23,21 @@ METHOD_INVERT = "invert"
 METHOD_SPEED = "speed"
 METHOD_INVERT_SPEED = "invert_speed"
 METHOD_MULTISTREAM = "multistream"
-METHOD_SPOOF = "spoof"
+METHOD_CHUNKED = "chunked"
 SUPPORTED_METHODS = (
     METHOD_INVERT,
     METHOD_SPEED,
     METHOD_INVERT_SPEED,
     METHOD_MULTISTREAM,
-    METHOD_SPOOF,
+    METHOD_CHUNKED,
 )
+
+# Default per-chunk length for the chunked method: 10s is the audio upload
+# limit for unverified Roblox accounts (verified accounts allow 6:59).
+DEFAULT_CHUNK_SECONDS = 10.0
+# Safety margin kept under the per-chunk limit so the Opus encoder's preskip
+# padding (~6.5ms) can never push a chunk's measured duration over it.
+CHUNK_SAFETY_SECONDS = 0.05
 
 
 def sanitize_asset_name(name: str, max_length: int = MAX_ASSET_NAME_LENGTH) -> str:
@@ -108,6 +116,7 @@ class CraftResult:
     declared_seconds: float   # what Discord's player will see
     method: str = METHOD_INVERT
     in_game_script: str = ""
+    chunk_paths: list = field(default_factory=list)  # set by the chunked method
 
 
 def default_output_path(
@@ -158,11 +167,12 @@ def craft(
       for duration. In game, Sound.PlaybackSpeed = 1/factor plays the full song at 100% normal pitch.
     - 'invert_speed': Combines both Phase Inversion and Speed Inversion.
     - 'multistream': Chained multi-stream OGG (Stream 1 2s EOS + Stream 2 full track).
-    - 'spoof': Fake-duration method for platform uploads. Roblox measures the DECODED duration
-      on upload (it transcodes audio on import), so the ENTIRE song - which may be longer than
-      any duration limit - is speed-compressed to physically fit the target seconds, and the
-      declared metadata is pinned just under the target as well. In game,
-      Sound.PlaybackSpeed = 1/factor restores the complete song at normal speed and pitch.
+    - 'chunked': The bulletproof way past upload duration limits. Roblox transcodes audio on
+      import and measures the DECODED duration, so no single-file trick can hide a long song.
+      Instead the ENTIRE song (any length, even over 6:59) is split into consecutive chunk
+      files that are each genuinely under the upload limit - nothing to detect - and a
+      generated in-game Script plays them back to back as one continuous song at normal
+      speed, pitch and quality.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -212,6 +222,7 @@ def craft(
 
     song_max = min(total_dur, MAX_SECONDS) if total_dur else MAX_SECONDS
 
+    chunk_paths: list = []  # filled by the chunked method
     if method == METHOD_INVERT:
         log(f"[3/4] Applying Phase Invert Method (L=+audio, R=-audio; mono preview cancels to silence)...")
         enc_dur = safe_encode_duration(song_max)
@@ -286,100 +297,123 @@ def craft(
             f"sound.Volume = 1.0\n"
             f"sound:Play()\n"
         )
-    elif method == METHOD_SPOOF:
-        # Roblox's upload validation measures the DECODED duration (it
-        # transcodes audio on import), so metadata tricks alone are not
-        # enough.  The spoof method therefore:
-        #   1. keeps the ENTIRE song (no 6:59 cap - any length goes in),
-        #   2. speed-compresses it so the stored/decoded duration physically
-        #      fits the target seconds (this is what Roblox measures), and
-        #   3. pins the declared metadata just under the target as well.
-        # In game, Sound.PlaybackSpeed = 1/factor restores the complete song
-        # at normal speed and pitch.
+    elif method == METHOD_CHUNKED:
+        # The bulletproof way past upload duration limits: every chunk file is
+        # a genuinely short, clean, single-stream OGG that passes validation on
+        # its own (real duration, real metadata - nothing to detect), and the
+        # generated in-game Script stitches them back into the full song at
+        # normal speed, pitch and quality.
         full_dur = total_dur if total_dur else song_max
-        if full_dur <= target_seconds:
-            log(
-                f"[3/4] Spoof Method: song ({full_dur:.2f}s) already fits the "
-                f"{target_seconds:.2f}s target; storing it untouched..."
-            )
+        chunk_len = target_seconds
+        # Keep every chunk just under the limit so the Opus encoder's preskip
+        # padding (~6.5ms) can never push its measured duration over it.
+        step = max(0.05, chunk_len - CHUNK_SAFETY_SECONDS)
+        count = max(1, int(math.ceil(full_dur / step)))
+
+        out_dir = os.path.dirname(output_path) or "."
+        stem = os.path.splitext(os.path.basename(output_path))[0]
+        if stem.lower().endswith(OUTPUT_SUFFIX):
+            stem = stem[: -len(OUTPUT_SUFFIX)]
+        # Leave room for the _cNNN suffix inside the 50-char asset-name limit.
+        stem = sanitize_asset_name(stem, MAX_ASSET_NAME_LENGTH - 5)
+
+        log(
+            f"[3/4] Chunked Method: splitting the full {ogg_util.format_seconds(full_dur)} "
+            f"song into {count} upload-safe chunk(s) of at most {chunk_len:.2f}s each..."
+        )
+        chunk_paths: list = []
+        encoder = ""
+        for i in range(1, count + 1):
+            start = (i - 1) * step
+            remaining = full_dur - start
+            if remaining <= 0.02:
+                break
+            dur = min(step, remaining)
+            chunk_path = os.path.join(out_dir, f"{stem}_c{i:03d}.ogg")
             encoder = ffmpeg_util.convert_to_ogg(
-                exe, input_path, output_path, codec, log=log
+                exe, input_path, chunk_path, codec,
+                start_time=start, duration=dur, log=log,
             )
-            with open(output_path, "rb") as handle:
-                out_data = handle.read()
-            pages = ogg_util.parse_pages(out_data)
-            out_codec, rate = ogg_util.detect_codec(out_data, pages)
-            actual_seconds = pages[-1].granule / rate
-            declared_seconds = actual_seconds
-            in_game_script = (
-                f"-- Spoof Method (song fits the {declared_seconds:.2f}s target; nothing to fake)\n"
-                f"local sound = script.Parent\n"
-                f"sound.Volume = 1.0\n"
-                f"sound:Play()\n"
-            )
-        else:
-            if speed_factor is not None and speed_factor > 0:
-                factor = float(speed_factor)
-            else:
-                # Compress to just under the target so neither the metadata
-                # nor the decoded duration can round up above a hard limit.
-                factor = full_dur / max(0.1, target_seconds - 0.05)
-            stored_dur = full_dur / factor
-            log(
-                f"[3/4] Spoof Method: speed-compressing the full "
-                f"{ogg_util.format_seconds(full_dur)} song {factor:.2f}x so Roblox "
-                f"only decodes {ogg_util.format_seconds(stored_dur)}..."
-            )
-            speed_filter = f"aresample=48000,asetrate=48000*{factor:.6f},aresample=48000"
-            encoder = ffmpeg_util.convert_to_ogg(
-                exe, input_path, output_path, codec, audio_filter=speed_filter, log=log
-            )
-            with open(output_path, "rb") as handle:
-                out_data = handle.read()
-            pages = ogg_util.parse_pages(out_data)
-            out_codec, rate = ogg_util.detect_codec(out_data, pages)
-            natural_seconds = pages[-1].granule / rate
-            if natural_seconds > target_seconds:
-                out_data, spoof_info = ogg_util.spoof_duration(out_data, target_seconds)
-                with open(output_path, "wb") as handle:
-                    handle.write(out_data)
-                declared_seconds = spoof_info["declared_seconds"]
-                log(
-                    f"      Pinned metadata to {ogg_util.format_seconds(declared_seconds)} "
-                    f"(rescaled {spoof_info['rewritten_granules']} granules)."
-                )
-            else:
-                declared_seconds = natural_seconds
-            actual_seconds = full_dur
-            playback_speed = 1.0 / factor
-            log(
-                f"      Stored/decoded duration: {ogg_util.format_seconds(natural_seconds)} "
-                f"(this is what Roblox measures on upload)."
-            )
-            if factor > 4.0:
-                log(
-                    f"      Note: {factor:.1f}x compression keeps ~{int(24000 / factor)} Hz of "
-                    f"the original audio band when restored; a larger duration "
-                    f"target gives higher quality."
-                )
-            warn_lines = ""
-            if playback_speed < 0.05:
-                warn_lines = (
-                    f"-- WARNING: PlaybackSpeed {playback_speed:.4f} is very low and may be "
-                    f"clamped by Roblox;\n"
-                    f"--          use a larger duration target for very long songs.\n"
-                )
-            in_game_script = (
-                f"-- Spoof Method (Roblox sees a {declared_seconds:.2f}s asset, "
-                f"full {actual_seconds:.2f}s song inside)\n"
-                f"-- Upload passed: stored audio is speed-compressed {factor:.2f}x and the "
-                f"metadata is pinned to {declared_seconds:.2f}s.\n"
-                f"{warn_lines}"
-                f"local sound = script.Parent\n"
-                f"sound.PlaybackSpeed = {playback_speed:.4f} -- restores the full "
-                f"{actual_seconds:.2f}s song at normal speed & pitch\n"
-                f"sound:Play()\n"
-            )
+            chunk_paths.append(chunk_path)
+        if not chunk_paths:
+            raise RuntimeError("Chunked method produced no chunk files")
+
+        with open(chunk_paths[0], "rb") as handle:
+            first_data = handle.read()
+        first_pages = ogg_util.parse_pages(first_data)
+        out_codec, _first_rate = ogg_util.detect_codec(first_data, first_pages)
+        output_path = chunk_paths[0]
+        declared_seconds = chunk_len
+        actual_seconds = full_dur
+
+        script_lines = [
+            "-- Coolin Chunked Song Player (generated)",
+            f"-- Full song: {ogg_util.format_seconds(full_dur)} split into {len(chunk_paths)} "
+            f"chunk(s), each <= {chunk_len:.2f}s (upload-limit safe).",
+            "-- 1) Upload every chunk file listed below to Roblox.",
+            "-- 2) Replace each placeholder ID with your uploaded asset ID (keep the order!).",
+            "-- 3) Put this Script inside a Part (or SoundService) - it plays the whole song.",
+            "",
+            "local CHUNK_IDS = {",
+        ]
+        for p in chunk_paths:
+            script_lines.append(f'\t"rbxassetid://0", -- {os.path.basename(p)}')
+        script_lines += [
+            "}",
+            "",
+            "local LOOP = false      -- true: restart the whole song when it ends",
+            "local VOLUME = 1        -- 0 to 1",
+            "local PRESTART = 0.05   -- switch chunks this many seconds early (gapless)",
+            "",
+            'local RunService = game:GetService("RunService")',
+            "",
+            "local sounds = {}",
+            "for i, id in ipairs(CHUNK_IDS) do",
+            '\tlocal s = Instance.new("Sound")',
+            '\ts.Name = "Chunk" .. i',
+            "\ts.SoundId = id",
+            "\ts.Volume = VOLUME",
+            "\ts.Parent = script",
+            "\tsounds[i] = s",
+            "end",
+            "",
+            "local index = 0",
+            "local current = nil",
+            "local lastSwitch = 0",
+            "",
+            "local function playNext()",
+            "\tif os.clock() - lastSwitch < 0.05 then return end",
+            "\tlastSwitch = os.clock()",
+            "\tindex += 1",
+            "\tif index > #sounds then",
+            "\t\tif LOOP then index = 1 else return end",
+            "\tend",
+            "\tif current then current:Stop() end",
+            "\tcurrent = sounds[index]",
+            "\tcurrent.TimePosition = 0",
+            "\tcurrent:Play()",
+            "end",
+            "",
+            "for _, s in ipairs(sounds) do",
+            "\ts.Ended:Connect(function()",
+            "\t\tif s == current then playNext() end",
+            "\tend)",
+            "end",
+            "",
+            "RunService.Heartbeat:Connect(function()",
+            "\tif current and current.TimeLength > 0",
+            "\t\tand current.TimePosition >= current.TimeLength - PRESTART then",
+            "\t\tplayNext()",
+            "\tend",
+            "end)",
+            "",
+            "playNext()",
+        ]
+        in_game_script = "\n".join(script_lines) + "\n"
+        log(
+            f"      Wrote {len(chunk_paths)} chunk file(s); upload them all and paste "
+            f"their asset IDs into the script below."
+        )
     else:  # METHOD_MULTISTREAM
         if target_seconds >= song_max:
             log(
@@ -469,6 +503,7 @@ def craft(
         declared_seconds=declared_seconds,
         method=method,
         in_game_script=in_game_script,
+        chunk_paths=chunk_paths if method == METHOD_CHUNKED else [],
     )
 
 
@@ -501,7 +536,7 @@ def verify(path: str, log: Callable[[str], None] = print) -> dict:
         log(f"Full-decode length:  {ogg_util.format_seconds(real_seconds)}")
         if report["declared_seconds"] is not None and real_seconds > report["declared_seconds"] * 1.5:
             log(
-                "Verdict:             Coolin spoof file (metadata says short, "
+                "Verdict:             hidden audio detected (metadata says short, "
                 f"really {ogg_util.format_seconds(real_seconds)} of audio inside)."
             )
     except Exception:

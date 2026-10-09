@@ -35,22 +35,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="custom asset name (max 50 chars, auto-shortened if needed)",
     )
     parser.add_argument(
-        "-d", "--seconds", default=str(pipeline.DEFAULT_FAKE_SECONDS),
-        help=f"duration the song should play for in Discord in seconds or MM:SS "
-             f"(default: {pipeline.DEFAULT_FAKE_SECONDS}, max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
+        "-d", "--seconds", default=None,
+        help=f"duration in seconds or MM:SS (default: {pipeline.DEFAULT_FAKE_SECONDS}; "
+             f"for the 'chunked' method: per-chunk upload length, default "
+             f"{pipeline.DEFAULT_CHUNK_SECONDS}s. Max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("invert", "speed", "invert_speed", "multistream", "spoof"),
+        choices=("invert", "speed", "invert_speed", "multistream", "chunked"),
         default=pipeline.METHOD_INVERT,
         help=(
             "conversion method: 'invert' (phase inversion: cancels to silence in mono/preview, "
             "plays in-game), 'speed' (playback speed invert: short physical file, plays full song "
             "in-game via Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' "
-            "(chained OGG), or 'spoof' (whole-song speed compression: even songs longer than "
-            "the 7-minute limit are squeezed into the target duration - which is what Roblox's "
-            "decoded-duration upload check measures - and the metadata is pinned under it too; "
-            "Sound.PlaybackSpeed = 1/factor restores the full song in game). Default: invert"
+            "(chained OGG), or 'chunked' (splits the full song - any length, even over 6:59 - "
+            "into consecutive chunk files that are each genuinely under the upload limit, and "
+            "generates an in-game Script that plays them as one continuous song at normal "
+            "speed, pitch and quality). Default: invert"
         ),
     )
     parser.add_argument(
@@ -91,7 +92,15 @@ def main(argv=None) -> int:
     if args.asset_name and len(args.inputs) > 1:
         parser.error("-n/--name can only be used with a single input file")
     try:
-        seconds = pipeline.parse_duration(args.seconds)
+        if args.seconds is None:
+            raw_seconds = (
+                pipeline.DEFAULT_CHUNK_SECONDS
+                if args.method == pipeline.METHOD_CHUNKED
+                else pipeline.DEFAULT_FAKE_SECONDS
+            )
+        else:
+            raw_seconds = args.seconds
+        seconds = pipeline.parse_duration(raw_seconds)
     except ValueError as exc:
         parser.error(str(exc))
 

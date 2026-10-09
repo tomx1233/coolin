@@ -10,7 +10,7 @@ using specialized game-compatible and preview methods:
 | **`invert` (Phase Invert)** | Stereo channels are placed 180° out of phase (`L = +audio, R = -audio`). When played in mono (e.g. web previews, moderation checks), the channels cancel to complete silence (-91 dB). Plays normally in-game / stereo. |
 | **`speed` (Speed Invert)** | The audio is sped up so the physical file duration matches the proclaimed duration (e.g. 2.0s). Cannot play past the proclaimed seconds in Discord, and cannot trigger platform "audio duration too long" errors. In game, `Sound.PlaybackSpeed = 1/factor` plays the full song at 100% normal pitch. |
 | **`invert_speed` (Combined)** | Both phase-inverted (silent in mono preview) AND sped up (short physical duration, cannot exceed length caps). |
-| **`spoof` (Fake Duration)** | Makes Roblox **think the file is a short song when it's not**. The entire song — even longer than the 7-minute upload limit — is speed-compressed so the *decoded* duration (what Roblox measures on upload, since it transcodes on import) and the declared metadata both fit the target (e.g. 10s or 6:59). In game, `Sound.PlaybackSpeed = 1/factor` restores the complete song at normal speed and pitch. |
+| **`chunked` (Upload-Safe Chunks)** | Makes Roblox **think they're short songs when the full song isn't**. The entire song — any length, even over 6:59 — is split into consecutive chunk files that are each *genuinely* under your account's upload limit (default 10s). Every chunk passes validation on its own (real duration, real metadata — nothing to detect), and a generated in-game Script plays them back to back as one continuous song at normal speed, pitch and quality. |
 | **`multistream`** | Chained multi-stream OGG (Stream 1 stops at Discord 2s EOS; Stream 2 carries remainder for VLC). |
 
 ## How the Invert & Game Methods Work
@@ -31,21 +31,20 @@ using specialized game-compatible and preview methods:
   ```
   The game's audio engine stretches the track back out to its full duration (up to 6:59) at 100% normal pitch and speed.
 
-### 3. Spoof Method (`spoof`) — *Roblox thinks it's a short song when it's not*
-- Roblox validates the **decoded** duration when you upload (it transcodes every audio asset on import), so metadata tricks alone don't cut it. The spoof method therefore does all of the following:
-  1. Keeps the **entire song** — no 6:59 cap, any length goes in (even 10+ minutes).
-  2. **Speed-compresses** the whole song so the stored audio physically decodes to only the target duration (e.g. `10s` or `6:59`) — the number Roblox actually measures on upload.
-  3. **Pins the declared metadata** just under the target as well (proportionally rescaled, monotonic granules), so both metadata and decode checks see a short, clean file.
-- In game, one line restores the complete song at normal speed and pitch:
-  ```lua
-  local sound = script.Parent
-  sound.PlaybackSpeed = 0.93 -- 1 / compression factor (printed by Coolin)
-  sound:Play()
-  ```
-- **Quality tips:** compression factor = song length ÷ target. A 7:30 song at `-d 6:59` only needs 1.07x (transparent). Squeezing a long song into a few seconds (e.g. 10 min → 10s = 60x) keeps only a narrow audio band when restored and pushes `PlaybackSpeed` very low (Roblox may clamp extreme values) — always use the **largest target your account's upload limit allows**.
-- Verify any crafted file with `python coolin_cli.py --verify file.ogg` — it reports the declared (metadata) duration and the full-decode length.
+### 3. Chunked Method (`chunked`) — *Roblox thinks they're short songs; the game plays the full song*
+- Roblox **transcodes audio on import and measures the decoded duration**, so no single-file trick (metadata rewrites, speed compression) can hide a long song from the upload check. The chunked method sidesteps the check entirely — honestly:
+  1. The **entire song** (any length — over 6:59 is fine) is split into consecutive chunk files, each *genuinely* under your account's upload limit (default **10s** for unverified accounts; set `-d 6:59` if your account allows the full length).
+  2. Every chunk is a clean, single-stream, limit-safe OGG — real duration, real metadata, nothing for validation to detect.
+  3. Coolin generates a ready-to-paste Roblox **Script** that loads all chunks and plays them back to back as **one continuous song** (gapless switching, loop option, volume control).
+- **Normal speed, normal pitch, full quality** — no `PlaybackSpeed` games, no chipmunk audio, no lost bandwidth.
+- Workflow:
+  1. `python coolin_cli.py song.mp3 -m chunked -d 10` → produces `song_c001.ogg`, `song_c002.ogg`, … (names stay within the 50-char asset limit)
+  2. Upload every chunk to Roblox (each one passes the duration check on its own).
+  3. Paste each returned asset ID into the generated script's `CHUNK_IDS` table, **in order**.
+  4. Put the Script into a Part (or SoundService) — the full song plays.
+- Tip: fewer chunks = fewer uploads. If your account is verified for 6:59 uploads, use `-d 6:59` and even a 15-minute song only needs 3 chunks.
 
-## Requirements
+## Requirements## Requirements
 
 - Python 3.8+ (tkinter ships with the standard Windows installer)
 - Bundles ffmpeg via `imageio-ffmpeg`:
@@ -59,8 +58,8 @@ pip install -r requirements.txt
 Double-click **`run_gui.bat`** (or run `python coolin_gui.py`):
 
 1. **Insert audio file(s)** — add one or more songs.
-2. Select your **Method** (`invert`, `speed`, `invert_speed`, `spoof`, or `multistream`).
-3. Set the target duration or speed multiplier (max `6:59` / `419.0s`).
+2. Select your **Method** (`invert`, `speed`, `invert_speed`, `chunked`, or `multistream`).
+3. Set the target duration (for `chunked`: the per-chunk upload length, max `6:59` / `419.0s`).
 4. Press **Convert to Discord OGG**.
 5. Copy the generated in-game playback script directly from the log output!
 
@@ -76,12 +75,12 @@ python coolin_cli.py song.mp3 -m speed -d 2
 :: Invert + Speed combined
 python coolin_cli.py song.mp3 -m invert_speed -d 2
 
-:: Spoof method: Roblox sees a 10 second song, full song restored in game
-:: (works even for songs longer than the 7 minute upload limit)
-python coolin_cli.py song.mp3 -m spoof -d 10
+:: Chunked method: split the full song (any length) into 10s upload-safe
+:: chunks + a generated in-game playlist Script (normal speed & quality)
+python coolin_cli.py song.mp3 -m chunked -d 10
 
-:: Spoof a song that's just over the limit: compress to 6:59 (barely any speedup)
-python coolin_cli.py song.mp3 -m spoof -d 6:59
+:: Verified account? Use bigger chunks (a 15-minute song = only 3 uploads)
+python coolin_cli.py song.mp3 -m chunked -d 6:59
 
 :: Custom speed multiplier (e.g. 4x speed -> in-game PlaybackSpeed 0.25)
 python coolin_cli.py song.mp3 -m speed -s 4.0

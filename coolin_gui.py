@@ -109,10 +109,10 @@ class CoolinApp(tk.Tk):
                          pipeline.METHOD_SPEED,
                          pipeline.METHOD_INVERT_SPEED,
                          pipeline.METHOD_MULTISTREAM,
-                         pipeline.METHOD_SPOOF,
+                         pipeline.METHOD_CHUNKED,
                      ),
                      state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
-        ttk.Label(options_frame, text="spoof = Roblox sees a short song; full song restored in game").grid(
+        ttk.Label(options_frame, text="chunked = splits song into upload-safe chunks + playlist script").grid(
             row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Duration / Limit (max 6:59):").grid(
@@ -146,13 +146,27 @@ class CoolinApp(tk.Tk):
         self.log(
             "Insert one or more audio files, pick a Method, and press Convert.\n"
             "invert: silent in mono previews  |  speed: physically short file, restored in game\n"
-            "spoof: Roblox sees a short song, full song inside  |  multistream: Discord stops early, VLC plays all"
+            "chunked: song split into upload-safe chunks + in-game playlist script  |  multistream: Discord stops early, VLC plays all"
         )
 
         # -- status bar -------------------------------------------------------------
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(root, textvariable=self.status_var, anchor="w",
                   relief="sunken").pack(fill="x", side="bottom")
+
+        # Switching to the chunked method: default the duration to the 10s
+        # per-chunk upload length (instead of the 2s Discord preview).
+        self.method_var.trace_add("write", self._on_method_changed)
+
+    def _on_method_changed(self, *_args) -> None:
+        if self.method_var.get() != pipeline.METHOD_CHUNKED:
+            return
+        try:
+            current = float(self.seconds_var.get())
+        except ValueError:
+            current = None
+        if current == pipeline.DEFAULT_FAKE_SECONDS:
+            self.seconds_var.set(str(pipeline.DEFAULT_CHUNK_SECONDS))
 
     # ------------------------------------------------------------- helpers
     def log(self, message: str) -> None:
@@ -273,7 +287,14 @@ class CoolinApp(tk.Tk):
                     log=self.log_queue.put,
                 )
                 succeeded += 1
-                self.log_queue.put(f"      OK: {result.output_path}")
+                if result.chunk_paths:
+                    for chunk_path in result.chunk_paths:
+                        self.log_queue.put(f"      chunk: {chunk_path}")
+                    self.log_queue.put(
+                        f"      OK: {len(result.chunk_paths)} chunk file(s) written"
+                    )
+                else:
+                    self.log_queue.put(f"      OK: {result.output_path}")
             except Exception as exc:
                 self.log_queue.put(f"      FAILED: {exc}")
             self.log_queue.put(_PROGRESS_TICK)
