@@ -14,7 +14,42 @@ DEFAULT_FAKE_SECONDS = 2.0
 DEFAULT_DURATION_SECONDS = 2.0
 MAX_SECONDS = 419.0  # 6 minutes and 59 seconds (6 * 60 + 59)
 MAX_DURATION_STR = "6:59"
+MAX_ASSET_NAME_LENGTH = 50
+MIN_ASSET_NAME_LENGTH = 1
 OUTPUT_SUFFIX = "_discord"
+
+
+def sanitize_asset_name(name: str, max_length: int = MAX_ASSET_NAME_LENGTH) -> str:
+    """Ensure an asset name is valid (1-50 characters, printable, trimmed of whitespace)."""
+    if name.lower().endswith(".ogg"):
+        name = name[:-4]
+    clean = "".join(c for c in name if c.isprintable()).strip()
+    if not clean:
+        clean = "Audio"
+    if len(clean) > max_length:
+        clean = clean[:max_length].rstrip()
+    if len(clean) < MIN_ASSET_NAME_LENGTH:
+        clean = "Audio"
+    return clean
+
+
+def make_valid_asset_filename(
+    base_name: str,
+    suffix: str = OUTPUT_SUFFIX,
+    max_length: int = MAX_ASSET_NAME_LENGTH,
+) -> str:
+    """Generate an asset filename (stem) that is at most *max_length* characters (default 50)."""
+    base_clean = "".join(c for c in base_name if c.isprintable()).strip()
+    if not base_clean:
+        base_clean = "Audio"
+    if len(base_clean + suffix) <= max_length:
+        return base_clean + suffix
+    avail = max_length - len(suffix)
+    if avail > 0:
+        truncated = base_clean[:avail].rstrip()
+        if truncated:
+            return truncated + suffix
+    return base_clean[:max_length].rstrip() or "Audio"
 
 
 def parse_duration(val: str | float | int) -> float:
@@ -60,9 +95,21 @@ class CraftResult:
     declared_seconds: float   # what Discord's player will see
 
 
-def default_output_path(input_path: str) -> str:
-    root, _ = os.path.splitext(input_path)
-    return root + OUTPUT_SUFFIX + ".ogg"
+def default_output_path(
+    input_path: str,
+    output_dir: Optional[str] = None,
+    custom_name: Optional[str] = None,
+    suffix: str = OUTPUT_SUFFIX,
+    max_asset_length: int = MAX_ASSET_NAME_LENGTH,
+) -> str:
+    """Generate a valid output path ensuring the asset name (file stem) is <= 50 characters."""
+    directory = output_dir if output_dir else os.path.dirname(input_path) or "."
+    if custom_name:
+        base = sanitize_asset_name(custom_name, max_asset_length)
+    else:
+        orig_base = os.path.splitext(os.path.basename(input_path))[0]
+        base = make_valid_asset_filename(orig_base, suffix=suffix, max_length=max_asset_length)
+    return os.path.join(directory, base + ".ogg")
 
 
 def craft(
@@ -73,18 +120,30 @@ def craft(
     log: Callable[[str], None] = print,
     *,
     duration_seconds: Optional[float] = None,
+    asset_name: Optional[str] = None,
 ) -> CraftResult:
     """Convert *input_path* into a multi-stream Discord OGG file:
     Stream 1 plays for the specified duration (up to 6 minutes and 59 seconds)
     and terminates with an EOS boundary so Discord stops playback at the
     specified song length, while Stream 2 carries the remainder of the song
     (up to the 6m 59s maximum length) so VLC and full demuxers play the entire track.
+    Ensures the asset name length does not exceed 50 characters.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
     if output_path is None:
-        output_path = default_output_path(input_path)
+        output_path = default_output_path(input_path, custom_name=asset_name)
+    else:
+        out_dir = os.path.dirname(output_path) or "."
+        out_base, ext = os.path.splitext(os.path.basename(output_path))
+        if not ext:
+            ext = ".ogg"
+        if len(out_base) > MAX_ASSET_NAME_LENGTH or asset_name:
+            chosen_name = asset_name if asset_name else out_base
+            out_base = sanitize_asset_name(chosen_name, MAX_ASSET_NAME_LENGTH)
+            output_path = os.path.join(out_dir, out_base + ext)
+
     output_path = os.path.abspath(output_path)
     if os.path.normcase(output_path) == os.path.normcase(input_path):
         raise ValueError("Output path must differ from the input path")

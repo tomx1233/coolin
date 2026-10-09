@@ -85,5 +85,6 @@ tests/test_ogg.py    unit tests (CRC, duration limits, trimming integrity)
 ## Notes & disclaimer
 
 - The maximum duration for any song is **6 minutes and 59 seconds** (419 seconds).
+- Asset names (file stems) are automatically kept within **50 characters** (the 1–50 character limit for Roblox / Discord asset creation) to prevent "Asset name length is invalid" errors.
 - Opus is the default on purpose: OGG/Opus is what Discord expects.
 - Run the tests with `python -m unittest discover -s tests -v`.

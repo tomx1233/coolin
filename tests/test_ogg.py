@@ -220,6 +220,34 @@ class OggCraftingTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             coolin_cli.main(["song.mp3", "-d", "420"])
 
+    def test_asset_name_length_limits(self):
+        """Asset names must be between 1 and 50 characters for platform compatibility."""
+        self.assertEqual(pipeline.MAX_ASSET_NAME_LENGTH, 50)
+        self.assertEqual(pipeline.MIN_ASSET_NAME_LENGTH, 1)
+
+        # Truncation of long names
+        very_long = "A" * 80
+        sanitized = pipeline.sanitize_asset_name(very_long)
+        self.assertLessEqual(len(sanitized), 50)
+        self.assertGreaterEqual(len(sanitized), 1)
+
+        # Filename generation with suffix
+        gen = pipeline.make_valid_asset_filename("Very Long Song Title Exceeding Fifty Characters Easily")
+        self.assertLessEqual(len(gen), 50)
+        self.assertGreaterEqual(len(gen), 1)
+
+        # Empty or whitespace fallback
+        self.assertEqual(pipeline.sanitize_asset_name("   "), "Audio")
+        self.assertLessEqual(len(pipeline.make_valid_asset_filename("")), 50)
+
+        # Craft produces a filename within 50 characters even with a long input path
+        long_wav_name = os.path.join(self.tmpdir.name, ("Z" * 60) + ".wav")
+        make_tone_wav(long_wav_name, seconds=1.0)
+        result = pipeline.craft(long_wav_name, log=lambda _: None)
+        out_stem = os.path.splitext(os.path.basename(result.output_path))[0]
+        self.assertLessEqual(len(out_stem), 50)
+        self.assertGreaterEqual(len(out_stem), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

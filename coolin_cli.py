@@ -31,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="output .ogg path (only valid with a single input file)",
     )
     parser.add_argument(
+        "-n", "--name", "--asset-name", dest="asset_name",
+        help="custom asset name (max 50 chars, auto-shortened if needed)",
+    )
+    parser.add_argument(
         "-d", "--seconds", default=str(pipeline.DEFAULT_FAKE_SECONDS),
         help=f"duration the song should play for in Discord in seconds or MM:SS "
              f"(default: {pipeline.DEFAULT_FAKE_SECONDS}, max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
@@ -65,6 +69,8 @@ def main(argv=None) -> int:
         parser.error("give at least one input file (or use --verify)")
     if args.output and len(args.inputs) > 1:
         parser.error("-o/--output can only be used with a single input file")
+    if args.asset_name and len(args.inputs) > 1:
+        parser.error("-n/--name can only be used with a single input file")
     try:
         seconds = pipeline.parse_duration(args.seconds)
     except ValueError as exc:
@@ -80,6 +86,7 @@ def main(argv=None) -> int:
                 output_path=args.output,
                 fake_seconds=seconds,
                 codec=args.codec,
+                asset_name=args.asset_name,
             )
         except Exception as exc:
             failures += 1

@@ -92,10 +92,18 @@ class CoolinApp(tk.Tk):
             variable=self.same_folder_var,
         ).grid(row=1, column=1, columnspan=2, sticky="w", padx=4)
 
+        ttk.Label(options_frame, text="Asset name (optional):").grid(
+            row=2, column=0, sticky="w", padx=8, pady=(4, 4))
+        self.asset_name_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=self.asset_name_var).grid(
+            row=2, column=1, sticky="ew", padx=4, pady=(4, 4))
+        ttk.Label(options_frame, text="max 50 chars (Roblox/Discord limit)").grid(
+            row=2, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+
         ttk.Label(options_frame, text="Discord duration (max 6:59):").grid(
-            row=2, column=0, sticky="w", padx=8, pady=(4, 8))
+            row=3, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
-        controls.grid(row=2, column=1, columnspan=2, sticky="w",
+        controls.grid(row=3, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
         self.seconds_var = tk.StringVar(value=str(pipeline.DEFAULT_FAKE_SECONDS))
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
@@ -200,29 +208,44 @@ class CoolinApp(tk.Tk):
             )
             return
 
+        raw_asset_name = self.asset_name_var.get().strip()
+        if raw_asset_name and len(raw_asset_name) > pipeline.MAX_ASSET_NAME_LENGTH:
+            messagebox.showerror(
+                "Coolin",
+                f"Asset name length is invalid ({len(raw_asset_name)} characters).\n"
+                f"Asset name must not exceed {pipeline.MAX_ASSET_NAME_LENGTH} characters."
+            )
+            return
+
         self.convert_button.configure(state="disabled")
         self.progress.configure(maximum=len(files), value=0)
         self.status_var.set("Converting...")
         self.worker = threading.Thread(
             target=self._worker,
             args=(files, seconds, self.codec_var.get(),
-                  self.same_folder_var.get(), self.output_dir_var.get().strip()),
+                  self.same_folder_var.get(), self.output_dir_var.get().strip(),
+                  raw_asset_name),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name) -> None:
         succeeded = 0
         for index, input_path in enumerate(files, 1):
             self.log_queue.put(
                 f"=== [{index}/{len(files)}] {os.path.basename(input_path)} ==="
             )
             output_path = None
+            # If a custom asset name is specified and converting a single file
+            single_name = asset_name if (asset_name and len(files) == 1) else None
             if not same_folder and output_dir:
-                base = os.path.splitext(os.path.basename(input_path))[0]
-                output_path = os.path.join(
-                    output_dir, base + pipeline.OUTPUT_SUFFIX + ".ogg"
+                output_path = pipeline.default_output_path(
+                    input_path, output_dir=output_dir, custom_name=single_name
+                )
+            elif single_name:
+                output_path = pipeline.default_output_path(
+                    input_path, custom_name=single_name
                 )
             try:
                 result = pipeline.craft(
@@ -230,6 +253,7 @@ class CoolinApp(tk.Tk):
                     output_path=output_path,
                     fake_seconds=seconds,
                     codec=codec,
+                    asset_name=single_name,
                     log=self.log_queue.put,
                 )
                 succeeded += 1
