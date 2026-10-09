@@ -36,23 +36,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-d", "--seconds", default=None,
-        help=f"duration in seconds or MM:SS (default: {pipeline.DEFAULT_FAKE_SECONDS}; "
-             f"for the 'chunked' method: per-chunk upload length, default "
-             f"{pipeline.DEFAULT_CHUNK_SECONDS}s. Max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
+        help=f"duration in seconds or MM:SS (for 'chunked': per-chunk upload length, "
+             f"default {pipeline.DEFAULT_CHUNK_SECONDS}s / {pipeline.MAX_DURATION_STR} = fewest "
+             f"uploads; for the other methods: Discord preview duration, default "
+             f"{pipeline.DEFAULT_FAKE_SECONDS}. Max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("invert", "speed", "invert_speed", "multistream", "chunked"),
-        default=pipeline.METHOD_INVERT,
+        choices=("chunked", "invert", "speed", "invert_speed", "multistream"),
+        default=pipeline.METHOD_CHUNKED,
         help=(
-            "conversion method: 'invert' (phase inversion: cancels to silence in mono/preview, "
-            "plays in-game), 'speed' (playback speed invert: short physical file, plays full song "
-            "in-game via Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' "
-            "(chained OGG), or 'chunked' (splits the full song - any length, even over 6:59 - "
-            "into consecutive chunk files that are each genuinely under the upload limit, and "
-            "generates an in-game Script that plays them as one continuous song at normal "
-            "speed, pitch and quality). Default: invert"
+            "conversion method: 'chunked' (RECOMMENDED: splits the full song - any length, "
+            "even over 6:59 - into lossless upload-safe chunk files and generates an in-game "
+            "Script that plays them as one continuous song at original quality), "
+            "'invert' (phase inversion: cancels to silence in mono/preview, plays in-game), "
+            "'speed' (playback speed invert: short physical file, plays full song in-game via "
+            "Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' (chained OGG for the "
+            "Discord preview trick). Default: chunked"
         ),
+    )
+    parser.add_argument(
+        "-f", "--chunk-format", choices=pipeline.CHUNK_FORMATS, default="auto",
+        help="chunk audio format for the 'chunked' method: 'auto' picks the best quality that "
+             "fits the 20 MB upload limit (lossless WAV -> lossless FLAC -> max-bitrate OGG), "
+             "or force 'wav'/'flac'/'ogg'. Default: auto",
     )
     parser.add_argument(
         "-s", "--speed-factor", type=float, default=None,
@@ -116,6 +123,7 @@ def main(argv=None) -> int:
                 codec=args.codec,
                 method=args.method,
                 speed_factor=args.speed_factor,
+                chunk_format=args.chunk_format,
                 asset_name=args.asset_name,
             )
         except Exception as exc:

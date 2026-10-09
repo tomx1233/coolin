@@ -306,7 +306,9 @@ class OggCraftingTest(unittest.TestCase):
 
     def test_chunked_method_splits_song_into_uploadable_chunks(self):
         """Chunked method: the song is split into consecutive chunk files that
-        are each genuinely under the per-chunk limit, with a playlist script."""
+        are each genuinely under the per-chunk limit, with a playlist script.
+        Short chunks must come out LOSSLESS (WAV) - the whole point of the
+        quality ladder."""
         out_path = os.path.join(self.tmpdir.name, "chunks", "tone.ogg")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         res = pipeline.craft(self.wav_path, output_path=out_path, method="chunked",
@@ -321,6 +323,9 @@ class OggCraftingTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(p), f"missing chunk {p}")
             stem = os.path.splitext(os.path.basename(p))[0]
             self.assertLessEqual(len(stem), pipeline.MAX_ASSET_NAME_LENGTH)
+            self.assertTrue(p.endswith((".wav", ".flac", ".ogg")))
+            self.assertLess(os.path.getsize(p), pipeline.MAX_UPLOAD_BYTES)
+            # 2s stereo chunks fit lossless WAV comfortably
             # Metadata scan: under the 2s chunk limit...
             probed = ffmpeg_util.probe_duration(self.ffmpeg, p)
             self.assertIsNotNone(probed)
@@ -329,22 +334,27 @@ class OggCraftingTest(unittest.TestCase):
             decoded = ffmpeg_util.decode_duration(self.ffmpeg, p)
             self.assertLessEqual(decoded, 2.0)
             total += decoded
-            report = ogg_util.describe(self._read(p))
-            self.assertTrue(report["all_crcs_valid"])
-            self.assertEqual(report["chained_streams"], 1)
+            if p.endswith(".ogg"):
+                report = ogg_util.describe(self._read(p))
+                self.assertTrue(report["all_crcs_valid"])
+                self.assertEqual(report["chained_streams"], 1)
+
+        # Short chunks must be lossless WAV.
+        self.assertTrue(all(p.endswith(".wav") for p in res.chunk_paths))
 
         # No audio lost: the chunks tile the whole song.
         self.assertAlmostEqual(total, TONE_SECONDS, delta=0.5)
 
-        # The playlist script references every chunk file.
+        # The playlist script references every chunk file and preloads them.
         self.assertIn("CHUNK_IDS", res.in_game_script)
         self.assertIn("rbxassetid://", res.in_game_script)
+        self.assertIn("PreloadAsync", res.in_game_script)
         for p in res.chunk_paths:
             self.assertIn(os.path.basename(p), res.in_game_script)
 
     def test_chunked_method_allows_songs_longer_than_upload_limit(self):
         """A 425s song (over the 6:59 limit) becomes chunks that are each under
-        the 6:59 per-chunk limit - the full song survives as chunk files."""
+        the 6:59 / 20 MB limits - the full song survives as chunk files."""
         long_wav = os.path.join(self.tmpdir.name, "long_song.wav")
         make_long_wav(long_wav, seconds=425.0)
         out_path = os.path.join(self.tmpdir.name, "chunks_long", "long.ogg")
@@ -354,10 +364,31 @@ class OggCraftingTest(unittest.TestCase):
         self.assertGreater(res.actual_seconds, pipeline.MAX_SECONDS)
         self.assertGreaterEqual(len(res.chunk_paths), 2)
         for p in res.chunk_paths:
+            self.assertTrue(os.path.isfile(p))
+            self.assertLess(os.path.getsize(p), pipeline.MAX_UPLOAD_BYTES)
             probed = ffmpeg_util.probe_duration(self.ffmpeg, p)
             self.assertIsNotNone(probed)
             self.assertLessEqual(probed, pipeline.MAX_SECONDS)
-            self.assertTrue(os.path.isfile(p))
+
+    def test_chunked_forced_ogg_respects_upload_size_limit(self):
+        """Forcing the OGG format on long chunks must auto-reduce the bitrate
+        so every chunk still fits the 20 MB upload limit."""
+        long_wav = os.path.join(self.tmpdir.name, "long_song2.wav")
+        make_long_wav(long_wav, seconds=425.0)
+        out_path = os.path.join(self.tmpdir.name, "chunks_ogg", "long.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(long_wav, output_path=out_path, method="chunked",
+                             fake_seconds=pipeline.MAX_SECONDS,
+                             chunk_format="ogg", log=lambda _: None)
+        self.assertGreaterEqual(len(res.chunk_paths), 2)
+        for p in res.chunk_paths:
+            self.assertTrue(p.endswith(".ogg"))
+            self.assertLess(os.path.getsize(p), pipeline.MAX_UPLOAD_BYTES)
+            probed = ffmpeg_util.probe_duration(self.ffmpeg, p)
+            self.assertIsNotNone(probed)
+            self.assertLessEqual(probed, pipeline.MAX_SECONDS)
+            report = ogg_util.describe(self._read(p))
+            self.assertTrue(report["all_crcs_valid"])
 
 
 if __name__ == "__main__":

@@ -133,6 +133,61 @@ def convert_to_ogg(
     return encoder
 
 
+def convert_segment(
+    exe: str,
+    input_path: str,
+    output_path: str,
+    fmt: str = "ogg",
+    start_time: Optional[float] = None,
+    duration: Optional[float] = None,
+    bitrate: Optional[int] = None,
+    log=print,
+) -> str:
+    """Encode ONE segment of *input_path* as an upload-safe chunk file.
+
+    fmt: 'wav' (lossless PCM), 'flac' (lossless) or 'ogg' (Opus at *bitrate*).
+    The extension of *output_path* must match the format.  Returns the codec.
+
+    Used by the chunked method: since Roblox transcodes every upload itself,
+    feeding it lossless chunks means Roblox's own transcode is the ONLY lossy
+    step - i.e. the closest possible result to the original song.
+    """
+    if fmt == "wav":
+        codec_args = ["-c:a", "pcm_s16le", "-ar", "48000"]
+        codec = "pcm_s16le"
+    elif fmt == "flac":
+        codec_args = ["-c:a", "flac", "-compression_level", "8", "-ar", "48000"]
+        codec = "flac"
+    elif fmt == "ogg":
+        encoders = available_encoders(exe)
+        encoder = pick_encoder("auto", encoders)
+        if encoder == "libopus" and bitrate:
+            codec_args = ["-c:a", "libopus", "-b:a", str(int(bitrate)), "-ar", "48000"]
+        else:
+            codec_args = encoder_args(encoder)
+        codec = encoder
+    else:
+        raise ValueError(f"Unsupported chunk format: {fmt!r}")
+    seek_args = ["-ss", str(start_time)] if start_time is not None else []
+    duration_args = ["-t", str(duration)] if duration is not None else []
+    cmd = (
+        [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+        + seek_args
+        + ["-i", input_path]
+        + duration_args
+        + ["-map", "0:a:0", "-vn"]
+        + codec_args
+        + [output_path]
+    )
+    log(f"ffmpeg: {' '.join(_quote(arg) for arg in cmd)}")
+    result = _run(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg failed to convert the input file:\n" + result.stderr.strip()
+        )
+    return codec
+
+
 def probe_duration(exe: str, path: str) -> Optional[float]:
     """Best-effort duration (seconds) as ffmpeg sees it; None if unknown."""
     result = _run([exe, "-hide_banner", "-i", path])

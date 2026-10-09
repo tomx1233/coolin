@@ -32,7 +32,7 @@ _PROGRESS_TICK = "__coolin_tick__"
 class CoolinApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"Coolin {__version__} - Discord 2-Second OGG Converter")
+        self.title(f"Coolin {__version__} - Roblox & Discord Audio Converter")
         self.geometry("720x540")
         self.minsize(600, 440)
 
@@ -102,7 +102,7 @@ class CoolinApp(tk.Tk):
 
         ttk.Label(options_frame, text="Method:").grid(
             row=3, column=0, sticky="w", padx=8, pady=(4, 4))
-        self.method_var = tk.StringVar(value=pipeline.METHOD_INVERT)
+        self.method_var = tk.StringVar(value=pipeline.METHOD_CHUNKED)
         ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
                      values=(
                          pipeline.METHOD_INVERT,
@@ -112,15 +112,19 @@ class CoolinApp(tk.Tk):
                          pipeline.METHOD_CHUNKED,
                      ),
                      state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
-        ttk.Label(options_frame, text="chunked = splits song into upload-safe chunks + playlist script").grid(
+        ttk.Label(options_frame, text="chunked = lossless upload-safe chunks + playlist script (best)").grid(
             row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
-        ttk.Label(options_frame, text="Duration / Limit (max 6:59):").grid(
+        ttk.Label(options_frame, text="Per-chunk / Discord duration (max 6:59):").grid(
             row=4, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
         controls.grid(row=4, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
-        self.seconds_var = tk.StringVar(value=str(pipeline.DEFAULT_FAKE_SECONDS))
+        self.seconds_var = tk.StringVar(value=str(
+            pipeline.DEFAULT_CHUNK_SECONDS
+            if self.method_var.get() == pipeline.METHOD_CHUNKED
+            else pipeline.DEFAULT_FAKE_SECONDS
+        ))
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")
         ttk.Label(controls, text="   Codec:").pack(side="left", padx=(16, 4))
@@ -145,8 +149,8 @@ class CoolinApp(tk.Tk):
         self.log_text.pack(fill="both", expand=True, **pad)
         self.log(
             "Insert one or more audio files, pick a Method, and press Convert.\n"
-            "invert: silent in mono previews  |  speed: physically short file, restored in game\n"
-            "chunked: song split into upload-safe chunks + in-game playlist script  |  multistream: Discord stops early, VLC plays all"
+            "chunked (best): lossless upload-safe chunks + in-game playlist script - works for songs of ANY length\n"
+            "invert: silent in mono previews  |  speed: short file, restored in game  |  multistream: Discord stops early, VLC plays all"
         )
 
         # -- status bar -------------------------------------------------------------

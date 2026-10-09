@@ -32,12 +32,18 @@ SUPPORTED_METHODS = (
     METHOD_CHUNKED,
 )
 
-# Default per-chunk length for the chunked method: 10s is the audio upload
-# limit for unverified Roblox accounts (verified accounts allow 6:59).
-DEFAULT_CHUNK_SECONDS = 10.0
+# Default per-chunk length for the chunked method.  Roblox's import limit is
+# "less than 7 minutes" per asset, so 6:59 chunks = the fewest uploads.
+DEFAULT_CHUNK_SECONDS = MAX_SECONDS
 # Safety margin kept under the per-chunk limit so the Opus encoder's preskip
 # padding (~6.5ms) can never push a chunk's measured duration over it.
 CHUNK_SAFETY_SECONDS = 0.05
+# Roblox import requirements (create.roblox.com/docs/en-us/audio/assets):
+# single stream, .mp3/.ogg/.wav/.flac, < 20 MB, < 7 minutes, <= 48 kHz.
+MAX_UPLOAD_BYTES = 19_000_000   # safely under the 20 MB limit
+WAV_MAX_SECONDS = 95.0          # 48 kHz stereo 16-bit WAV stays under 20 MB
+OPUS_MAX_BITRATE = 256_000      # widely-supported libopus ceiling (transparent for stereo)
+CHUNK_FORMATS = ("auto", "wav", "flac", "ogg")
 
 
 def sanitize_asset_name(name: str, max_length: int = MAX_ASSET_NAME_LENGTH) -> str:
@@ -152,6 +158,7 @@ def craft(
     codec: str = "auto",
     method: str = METHOD_INVERT,
     speed_factor: Optional[float] = None,
+    chunk_format: str = "auto",
     log: Callable[[str], None] = print,
     *,
     duration_seconds: Optional[float] = None,
@@ -167,12 +174,17 @@ def craft(
       for duration. In game, Sound.PlaybackSpeed = 1/factor plays the full song at 100% normal pitch.
     - 'invert_speed': Combines both Phase Inversion and Speed Inversion.
     - 'multistream': Chained multi-stream OGG (Stream 1 2s EOS + Stream 2 full track).
-    - 'chunked': The bulletproof way past upload duration limits. Roblox transcodes audio on
-      import and measures the DECODED duration, so no single-file trick can hide a long song.
-      Instead the ENTIRE song (any length, even over 6:59) is split into consecutive chunk
-      files that are each genuinely under the upload limit - nothing to detect - and a
-      generated in-game Script plays them back to back as one continuous song at normal
-      speed, pitch and quality.
+    - 'chunked': The best possible way past upload duration limits at full
+      quality. Roblox transcodes audio on import and measures the DECODED
+      duration, so no single-file trick can hide a long song. Instead the
+      ENTIRE song (any length, even over 6:59) is split into consecutive chunk
+      files that are each genuinely under the 7-minute/20 MB import limits -
+      nothing to detect - encoded LOSSLESSLY (WAV, else FLAC) whenever they
+      fit so Roblox's own transcode is the only lossy step, with
+      maximum-bitrate Opus as fallback. A generated in-game Script preloads
+      all chunks and plays them back to back as one continuous song at normal
+      speed, pitch and original quality. chunk_format: 'auto' (default),
+      'wav', 'flac' or 'ogg'.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -298,11 +310,20 @@ def craft(
             f"sound:Play()\n"
         )
     elif method == METHOD_CHUNKED:
-        # The bulletproof way past upload duration limits: every chunk file is
-        # a genuinely short, clean, single-stream OGG that passes validation on
-        # its own (real duration, real metadata - nothing to detect), and the
-        # generated in-game Script stitches them back into the full song at
-        # normal speed, pitch and quality.
+        # The best possible way to get a full song into Roblox at original
+        # quality: every chunk file is a genuinely short, clean, single-stream
+        # audio file that passes import validation on its own (real duration,
+        # real metadata - nothing to detect), and the generated in-game Script
+        # plays them back to back as one continuous song.  Because Roblox
+        # transcodes every upload itself, chunks are encoded LOSSLESSLY
+        # (WAV, else FLAC) whenever they fit the 20 MB limit; only oversized
+        # chunks fall back to maximum-bitrate Opus.  That makes Roblox's own
+        # transcode the only lossy step - as close to the original as the
+        # platform allows.
+        if chunk_format not in CHUNK_FORMATS:
+            raise ValueError(
+                f"chunk_format must be one of {CHUNK_FORMATS}, got {chunk_format!r}"
+            )
         full_dur = total_dur if total_dur else song_max
         chunk_len = target_seconds
         # Keep every chunk just under the limit so the Opus encoder's preskip
@@ -322,6 +343,7 @@ def craft(
             f"song into {count} upload-safe chunk(s) of at most {chunk_len:.2f}s each..."
         )
         chunk_paths: list = []
+        chunk_formats: list = []
         encoder = ""
         for i in range(1, count + 1):
             start = (i - 1) * step
@@ -329,19 +351,63 @@ def craft(
             if remaining <= 0.02:
                 break
             dur = min(step, remaining)
-            chunk_path = os.path.join(out_dir, f"{stem}_c{i:03d}.ogg")
-            encoder = ffmpeg_util.convert_to_ogg(
-                exe, input_path, chunk_path, codec,
-                start_time=start, duration=dur, log=log,
+            base = os.path.join(out_dir, f"{stem}_c{i:03d}")
+
+            # Quality ladder: lossless WAV -> lossless FLAC -> max-bitrate Opus.
+            # Every attempt is size-checked against the 20 MB upload limit and
+            # falls through to the next rung when it does not fit.
+            if chunk_format == "auto":
+                candidates = []
+                if dur <= WAV_MAX_SECONDS:
+                    candidates.append("wav")
+                candidates += ["flac", "ogg"]
+            else:
+                candidates = [chunk_format]
+
+            chosen_path = None
+            chosen_fmt = None
+            last_error: Exception | None = None
+            for fmt in candidates:
+                path = base + "." + fmt
+                try:
+                    if fmt == "ogg":
+                        # Bitrate that mathematically cannot exceed 20 MB.
+                        bitrate = min(OPUS_MAX_BITRATE, int(MAX_UPLOAD_BYTES * 8 / dur))
+                        encoder = ffmpeg_util.convert_segment(
+                            exe, input_path, path, fmt="ogg",
+                            start_time=start, duration=dur, bitrate=bitrate, log=log,
+                        )
+                    else:
+                        encoder = ffmpeg_util.convert_segment(
+                            exe, input_path, path, fmt=fmt,
+                            start_time=start, duration=dur, log=log,
+                        )
+                except RuntimeError as exc:
+                    last_error = exc
+                    continue
+                if os.path.getsize(path) <= MAX_UPLOAD_BYTES:
+                    chosen_path, chosen_fmt = path, fmt
+                    break
+                try:
+                    os.remove(path)  # too big for the upload limit; next rung
+                except OSError:
+                    pass
+            if chosen_path is None:
+                raise RuntimeError(
+                    f"Could not encode chunk {i} under the 20 MB upload limit: {last_error}"
+                )
+            chunk_paths.append(chosen_path)
+            chunk_formats.append(chosen_fmt)
+            size_mb = os.path.getsize(chosen_path) / 1_000_000
+            lossless = "lossless " if chosen_fmt in ("wav", "flac") else ""
+            log(
+                f"      chunk {i}/{count}: {os.path.basename(chosen_path)} "
+                f"[{chosen_fmt.upper()} {lossless}| {dur:.2f}s | {size_mb:.2f} MB]"
             )
-            chunk_paths.append(chunk_path)
         if not chunk_paths:
             raise RuntimeError("Chunked method produced no chunk files")
 
-        with open(chunk_paths[0], "rb") as handle:
-            first_data = handle.read()
-        first_pages = ogg_util.parse_pages(first_data)
-        out_codec, _first_rate = ogg_util.detect_codec(first_data, first_pages)
+        out_codec = chunk_formats[0]
         output_path = chunk_paths[0]
         declared_seconds = chunk_len
         actual_seconds = full_dur
@@ -366,6 +432,7 @@ def craft(
             "local PRESTART = 0.05   -- switch chunks this many seconds early (gapless)",
             "",
             'local RunService = game:GetService("RunService")',
+            'local ContentProvider = game:GetService("ContentProvider")',
             "",
             "local sounds = {}",
             "for i, id in ipairs(CHUNK_IDS) do",
@@ -376,6 +443,11 @@ def craft(
             "\ts.Parent = script",
             "\tsounds[i] = s",
             "end",
+            "",
+            "-- Preload every chunk up front so switching is instant (no gaps).",
+            "task.spawn(function()",
+            "\tContentProvider:PreloadAsync(sounds)",
+            "end)",
             "",
             "local index = 0",
             "local current = nil",
@@ -390,6 +462,7 @@ def craft(
             "\tend",
             "\tif current then current:Stop() end",
             "\tcurrent = sounds[index]",
+            "\tif not current.IsLoaded then current.Loaded:Wait() end",
             "\tcurrent.TimePosition = 0",
             "\tcurrent:Play()",
             "end",
