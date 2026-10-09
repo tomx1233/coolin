@@ -112,7 +112,7 @@ class CoolinApp(tk.Tk):
                          pipeline.METHOD_SPOOF,
                      ),
                      state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
-        ttk.Label(options_frame, text="spoof = Roblox sees a short song, full song inside").grid(
+        ttk.Label(options_frame, text="spoof = Roblox sees a short song; full song restored in game").grid(
             row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Duration / Limit (max 6:59):").grid(

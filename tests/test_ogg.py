@@ -331,46 +331,52 @@ class OggCraftingTest(unittest.TestCase):
             ogg_util.spoof_duration(data, TONE_SECONDS + 10)
 
     def test_spoof_method_fools_scanners_but_keeps_full_song(self):
-        """Spoof method: metadata scanners see the short declared duration,
-        but decoding the file still yields the complete song."""
+        """Spoof method: Roblox sees the short target in BOTH the metadata and
+        the decoded duration (what its upload check measures), while the full
+        song survives inside, restorable via PlaybackSpeed."""
         out_path = os.path.join(self.tmpdir.name, "tone_spoof.ogg")
         res = pipeline.craft(self.wav_path, output_path=out_path, method="spoof",
                              fake_seconds=2.0, log=lambda _: None)
         self.assertTrue(os.path.isfile(out_path))
         self.assertAlmostEqual(res.declared_seconds, 2.0, delta=0.5)
-        self.assertGreater(res.actual_seconds, TONE_SECONDS * 0.9)
-        self.assertIn("Spoof Method", res.in_game_script)
+        self.assertAlmostEqual(res.actual_seconds, TONE_SECONDS, delta=0.5)
+        self.assertIn("PlaybackSpeed", res.in_game_script)
         self.assertIn("sound:Play()", res.in_game_script)
 
-        # What a metadata scanner (upload validation) sees: the fake duration.
+        # Metadata scan sees the fake duration.
         probed = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
         self.assertIsNotNone(probed)
         self.assertAlmostEqual(probed, 2.0, delta=0.5)
 
-        # What a full decode (the in-game player) gets: the whole song.
+        # Full decode - what Roblox's upload validation measures - must ALSO
+        # be short; this is the fix for "audio duration too long".
         decoded = ffmpeg_util.decode_duration(self.ffmpeg, out_path)
-        self.assertGreater(decoded, TONE_SECONDS * 0.85)
+        self.assertLess(decoded, 3.0)
 
         report = ogg_util.describe(self._read(out_path))
         self.assertTrue(report["granules_monotonic"])
         self.assertTrue(report["all_crcs_valid"])
 
     def test_spoof_method_allows_songs_longer_than_upload_limit(self):
-        """Spoof method must NOT cap the real audio at 6:59 - a song longer
-        than the platform limit still goes in whole, just declared short."""
+        """A 425s song (over the 6:59 upload limit) must pass as a ~10s asset:
+        metadata AND decoded duration stay under the 10s target, while the
+        full 425s of song content is preserved for in-game restoration."""
         long_wav = os.path.join(self.tmpdir.name, "long_song.wav")
         make_long_wav(long_wav, seconds=425.0)
         out_path = os.path.join(self.tmpdir.name, "long_song_spoof.ogg")
         res = pipeline.craft(long_wav, output_path=out_path, method="spoof",
                              fake_seconds=10.0, log=lambda _: None)
-        self.assertGreater(res.actual_seconds, pipeline.MAX_SECONDS,
-                           "the full 425s song must survive (no 6:59 cap for spoof)")
-        self.assertLessEqual(res.declared_seconds, 10.0)
+        # The whole song is kept - no 6:59 cap for the spoof method.
+        self.assertGreater(res.actual_seconds, pipeline.MAX_SECONDS)
+        # ...but everything Roblox measures stays under the 10s target.
+        self.assertLess(res.declared_seconds, 10.0)
         probed = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
         self.assertIsNotNone(probed)
-        self.assertLess(probed, 10.1)
+        self.assertLess(probed, 10.0)
         decoded = ffmpeg_util.decode_duration(self.ffmpeg, out_path)
-        self.assertGreater(decoded, pipeline.MAX_SECONDS)
+        self.assertLess(decoded, 10.0)
+        # The in-game script restores the full song.
+        self.assertIn("PlaybackSpeed", res.in_game_script)
 
 
 if __name__ == "__main__":

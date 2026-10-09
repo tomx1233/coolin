@@ -47,8 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
             "conversion method: 'invert' (phase inversion: cancels to silence in mono/preview, "
             "plays in-game), 'speed' (playback speed invert: short physical file, plays full song "
             "in-game via Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' "
-            "(chained OGG), or 'spoof' (fakes the declared duration so Roblox thinks it's a "
-            "short song while the full song stays inside and plays in-game). Default: invert"
+            "(chained OGG), or 'spoof' (whole-song speed compression: even songs longer than "
+            "the 7-minute limit are squeezed into the target duration - which is what Roblox's "
+            "decoded-duration upload check measures - and the metadata is pinned under it too; "
+            "Sound.PlaybackSpeed = 1/factor restores the full song in game). Default: invert"
         ),
     )
     parser.add_argument(

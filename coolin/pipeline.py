@@ -158,10 +158,11 @@ def craft(
       for duration. In game, Sound.PlaybackSpeed = 1/factor plays the full song at 100% normal pitch.
     - 'invert_speed': Combines both Phase Inversion and Speed Inversion.
     - 'multistream': Chained multi-stream OGG (Stream 1 2s EOS + Stream 2 full track).
-    - 'spoof': Fake-duration method for platform uploads. Every Ogg granule is rescaled so
-      metadata scanners (upload validation) believe the file is only *fake_seconds* long, while
-      the complete song - which may be longer than any duration limit - stays inside untouched
-      and plays in full in game.
+    - 'spoof': Fake-duration method for platform uploads. Roblox measures the DECODED duration
+      on upload (it transcodes audio on import), so the ENTIRE song - which may be longer than
+      any duration limit - is speed-compressed to physically fit the target seconds, and the
+      declared metadata is pinned just under the target as well. In game,
+      Sound.PlaybackSpeed = 1/factor restores the complete song at normal speed and pitch.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -286,41 +287,99 @@ def craft(
             f"sound:Play()\n"
         )
     elif method == METHOD_SPOOF:
-        log(
-            f"[3/4] Applying Spoof Method: metadata will declare "
-            f"{ogg_util.format_seconds(target_seconds)} while the full song stays inside..."
-        )
-        # Encode the COMPLETE song with no duration cap - the whole point of
-        # this method is that the real audio may exceed any platform limit.
-        encoder = ffmpeg_util.convert_to_ogg(
-            exe, input_path, output_path, codec, log=log
-        )
-        with open(output_path, "rb") as handle:
-            out_data = handle.read()
-        pages = ogg_util.parse_pages(out_data)
-        out_codec, rate = ogg_util.detect_codec(out_data, pages)
-        actual_seconds = pages[-1].granule / rate
-        if target_seconds < actual_seconds:
-            out_data, spoof_info = ogg_util.spoof_duration(out_data, target_seconds)
-            with open(output_path, "wb") as handle:
-                handle.write(out_data)
-            declared_seconds = spoof_info["declared_seconds"]
+        # Roblox's upload validation measures the DECODED duration (it
+        # transcodes audio on import), so metadata tricks alone are not
+        # enough.  The spoof method therefore:
+        #   1. keeps the ENTIRE song (no 6:59 cap - any length goes in),
+        #   2. speed-compresses it so the stored/decoded duration physically
+        #      fits the target seconds (this is what Roblox measures), and
+        #   3. pins the declared metadata just under the target as well.
+        # In game, Sound.PlaybackSpeed = 1/factor restores the complete song
+        # at normal speed and pitch.
+        full_dur = total_dur if total_dur else song_max
+        if full_dur <= target_seconds:
             log(
-                f"      Rescaled {spoof_info['rewritten_granules']} granule positions: "
-                f"scanners now see {ogg_util.format_seconds(declared_seconds)}."
+                f"[3/4] Spoof Method: song ({full_dur:.2f}s) already fits the "
+                f"{target_seconds:.2f}s target; storing it untouched..."
+            )
+            encoder = ffmpeg_util.convert_to_ogg(
+                exe, input_path, output_path, codec, log=log
+            )
+            with open(output_path, "rb") as handle:
+                out_data = handle.read()
+            pages = ogg_util.parse_pages(out_data)
+            out_codec, rate = ogg_util.detect_codec(out_data, pages)
+            actual_seconds = pages[-1].granule / rate
+            declared_seconds = actual_seconds
+            in_game_script = (
+                f"-- Spoof Method (song fits the {declared_seconds:.2f}s target; nothing to fake)\n"
+                f"local sound = script.Parent\n"
+                f"sound.Volume = 1.0\n"
+                f"sound:Play()\n"
             )
         else:
-            # Song is already shorter than the target - nothing to hide.
-            declared_seconds = actual_seconds
-            log("      Song is already shorter than the target; left duration untouched.")
-        in_game_script = (
-            f"-- Spoof Method (metadata says {declared_seconds:.2f}s, full {actual_seconds:.2f}s song inside)\n"
-            f"-- Upload validation only sees the short declared duration.\n"
-            f"-- The full song plays at normal speed in game - no special setup needed:\n"
-            f"local sound = script.Parent\n"
-            f"sound.Volume = 1.0\n"
-            f"sound:Play()\n"
-        )
+            if speed_factor is not None and speed_factor > 0:
+                factor = float(speed_factor)
+            else:
+                # Compress to just under the target so neither the metadata
+                # nor the decoded duration can round up above a hard limit.
+                factor = full_dur / max(0.1, target_seconds - 0.05)
+            stored_dur = full_dur / factor
+            log(
+                f"[3/4] Spoof Method: speed-compressing the full "
+                f"{ogg_util.format_seconds(full_dur)} song {factor:.2f}x so Roblox "
+                f"only decodes {ogg_util.format_seconds(stored_dur)}..."
+            )
+            speed_filter = f"aresample=48000,asetrate=48000*{factor:.6f},aresample=48000"
+            encoder = ffmpeg_util.convert_to_ogg(
+                exe, input_path, output_path, codec, audio_filter=speed_filter, log=log
+            )
+            with open(output_path, "rb") as handle:
+                out_data = handle.read()
+            pages = ogg_util.parse_pages(out_data)
+            out_codec, rate = ogg_util.detect_codec(out_data, pages)
+            natural_seconds = pages[-1].granule / rate
+            if natural_seconds > target_seconds:
+                out_data, spoof_info = ogg_util.spoof_duration(out_data, target_seconds)
+                with open(output_path, "wb") as handle:
+                    handle.write(out_data)
+                declared_seconds = spoof_info["declared_seconds"]
+                log(
+                    f"      Pinned metadata to {ogg_util.format_seconds(declared_seconds)} "
+                    f"(rescaled {spoof_info['rewritten_granules']} granules)."
+                )
+            else:
+                declared_seconds = natural_seconds
+            actual_seconds = full_dur
+            playback_speed = 1.0 / factor
+            log(
+                f"      Stored/decoded duration: {ogg_util.format_seconds(natural_seconds)} "
+                f"(this is what Roblox measures on upload)."
+            )
+            if factor > 4.0:
+                log(
+                    f"      Note: {factor:.1f}x compression keeps ~{int(24000 / factor)} Hz of "
+                    f"the original audio band when restored; a larger duration "
+                    f"target gives higher quality."
+                )
+            warn_lines = ""
+            if playback_speed < 0.05:
+                warn_lines = (
+                    f"-- WARNING: PlaybackSpeed {playback_speed:.4f} is very low and may be "
+                    f"clamped by Roblox;\n"
+                    f"--          use a larger duration target for very long songs.\n"
+                )
+            in_game_script = (
+                f"-- Spoof Method (Roblox sees a {declared_seconds:.2f}s asset, "
+                f"full {actual_seconds:.2f}s song inside)\n"
+                f"-- Upload passed: stored audio is speed-compressed {factor:.2f}x and the "
+                f"metadata is pinned to {declared_seconds:.2f}s.\n"
+                f"{warn_lines}"
+                f"local sound = script.Parent\n"
+                f"sound.PlaybackSpeed = {playback_speed:.4f} -- restores the full "
+                f"{actual_seconds:.2f}s song at normal speed & pitch\n"
+                f"sound:Play()\n"
+            )
     else:  # METHOD_MULTISTREAM
         if target_seconds >= song_max:
             log(

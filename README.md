@@ -10,7 +10,7 @@ using specialized game-compatible and preview methods:
 | **`invert` (Phase Invert)** | Stereo channels are placed 180° out of phase (`L = +audio, R = -audio`). When played in mono (e.g. web previews, moderation checks), the channels cancel to complete silence (-91 dB). Plays normally in-game / stereo. |
 | **`speed` (Speed Invert)** | The audio is sped up so the physical file duration matches the proclaimed duration (e.g. 2.0s). Cannot play past the proclaimed seconds in Discord, and cannot trigger platform "audio duration too long" errors. In game, `Sound.PlaybackSpeed = 1/factor` plays the full song at 100% normal pitch. |
 | **`invert_speed` (Combined)** | Both phase-inverted (silent in mono preview) AND sped up (short physical duration, cannot exceed length caps). |
-| **`spoof` (Fake Duration)** | Makes Roblox (and any metadata scanner) **think the file is a short song when it's not**. Every Ogg granule position is proportionally rescaled so the file *declares* only the target duration (e.g. 10s or 6:59), while the complete song — even one longer than the 7-minute upload limit — stays inside, untouched and fully decodable. Upload validation sees the short duration; in game the full song plays at normal speed with no special setup. |
+| **`spoof` (Fake Duration)** | Makes Roblox **think the file is a short song when it's not**. The entire song — even longer than the 7-minute upload limit — is speed-compressed so the *decoded* duration (what Roblox measures on upload, since it transcodes on import) and the declared metadata both fit the target (e.g. 10s or 6:59). In game, `Sound.PlaybackSpeed = 1/factor` restores the complete song at normal speed and pitch. |
 | **`multistream`** | Chained multi-stream OGG (Stream 1 stops at Discord 2s EOS; Stream 2 carries remainder for VLC). |
 
 ## How the Invert & Game Methods Work
@@ -32,16 +32,18 @@ using specialized game-compatible and preview methods:
   The game's audio engine stretches the track back out to its full duration (up to 6:59) at 100% normal pitch and speed.
 
 ### 3. Spoof Method (`spoof`) — *Roblox thinks it's a short song when it's not*
-- The complete song is encoded with **no length cap** (it can be longer than the 6:59 / 7-minute upload limit).
-- Every Ogg page's granule position is then **proportionally rescaled** so the container *declares* only the target duration (e.g. `10s`, or `6:59` to disguise a 10-minute song). The declared value is kept just under the target so hard limit checks never see it rounded up.
-- Because the granules stay perfectly monotonic, every parser — including ones that compute duration from granule deltas with unsigned arithmetic (the ones that previously produced "audio duration too long") — sees a short, clean, well-formed file.
-- The audio packets themselves are never touched: a demuxer that decodes to EOF (and a server-side transcode) still gets the **entire song**, so it plays in full at normal speed in game — no `PlaybackSpeed` or special script needed:
+- Roblox validates the **decoded** duration when you upload (it transcodes every audio asset on import), so metadata tricks alone don't cut it. The spoof method therefore does all of the following:
+  1. Keeps the **entire song** — no 6:59 cap, any length goes in (even 10+ minutes).
+  2. **Speed-compresses** the whole song so the stored audio physically decodes to only the target duration (e.g. `10s` or `6:59`) — the number Roblox actually measures on upload.
+  3. **Pins the declared metadata** just under the target as well (proportionally rescaled, monotonic granules), so both metadata and decode checks see a short, clean file.
+- In game, one line restores the complete song at normal speed and pitch:
   ```lua
   local sound = script.Parent
-  sound.Volume = 1.0
+  sound.PlaybackSpeed = 0.93 -- 1 / compression factor (printed by Coolin)
   sound:Play()
   ```
-- Verify what's really inside any crafted file with `python coolin_cli.py --verify file.ogg` — it reports both the declared (scanner) duration and the full-decode length.
+- **Quality tips:** compression factor = song length ÷ target. A 7:30 song at `-d 6:59` only needs 1.07x (transparent). Squeezing a long song into a few seconds (e.g. 10 min → 10s = 60x) keeps only a narrow audio band when restored and pushes `PlaybackSpeed` very low (Roblox may clamp extreme values) — always use the **largest target your account's upload limit allows**.
+- Verify any crafted file with `python coolin_cli.py --verify file.ogg` — it reports the declared (metadata) duration and the full-decode length.
 
 ## Requirements
 
@@ -74,9 +76,12 @@ python coolin_cli.py song.mp3 -m speed -d 2
 :: Invert + Speed combined
 python coolin_cli.py song.mp3 -m invert_speed -d 2
 
-:: Spoof method: Roblox thinks it's a 10 second song, full song inside & plays in game
+:: Spoof method: Roblox sees a 10 second song, full song restored in game
 :: (works even for songs longer than the 7 minute upload limit)
 python coolin_cli.py song.mp3 -m spoof -d 10
+
+:: Spoof a song that's just over the limit: compress to 6:59 (barely any speedup)
+python coolin_cli.py song.mp3 -m spoof -d 6:59
 
 :: Custom speed multiplier (e.g. 4x speed -> in-game PlaybackSpeed 0.25)
 python coolin_cli.py song.mp3 -m speed -s 4.0
