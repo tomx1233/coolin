@@ -200,6 +200,11 @@ class OggCraftingTest(unittest.TestCase):
         decoded_seconds = pcm_bytes / (48000 * 2 * 2)
         self.assertGreater(decoded_seconds, TONE_SECONDS * 0.85)
 
+        # Granules in all streams must be strictly monotonic (no backward jumps/underflow)
+        report = ogg_util.describe(data)
+        self.assertTrue(report["granules_monotonic"], "Chained stream granules must be monotonic")
+        self.assertLessEqual(report["full_audio_seconds"], pipeline.MAX_SECONDS)
+
     def test_craft_rejects_exceeding_max_duration(self):
         """Craft must reject durations longer than 6 min 59 seconds (419s)."""
         craft_out = os.path.join(self.tmpdir.name, "should_fail.ogg")
@@ -207,6 +212,12 @@ class OggCraftingTest(unittest.TestCase):
             pipeline.craft(self.wav_path, output_path=craft_out, fake_seconds=420)
         with self.assertRaises(ValueError):
             pipeline.craft(self.wav_path, output_path=craft_out, fake_seconds="7:00")
+
+    def test_safe_encode_duration_caps_under_7_minutes(self):
+        """safe_encode_duration must guarantee duration <= 419.00s."""
+        self.assertLessEqual(pipeline.safe_encode_duration(419.0), 419.0)
+        self.assertLessEqual(pipeline.safe_encode_duration(500.0), 419.0)
+        self.assertAlmostEqual(pipeline.safe_encode_duration(419.0), 419.0 - (312 / 48000), places=4)
 
     def test_cli_handles_duration_formats_and_limits(self):
         """CLI accepts MM:SS format up to 6:59 and rejects > 6:59."""

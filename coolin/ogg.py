@@ -213,25 +213,47 @@ def describe(data: bytes) -> Dict:
     pages = parse_pages(data)
     codec, rate = detect_codec(data, pages)
 
-    real_granules = [p.granule for p in pages[:-1] if p.granule >= 0]
-    real_max = max(real_granules) if real_granules else 0
-    last = pages[-1]
+    # Group pages by serial number to handle both single streams and chained streams
+    streams: Dict[int, list] = {}
+    for p in pages:
+        streams.setdefault(p.serial, []).append(p)
 
     monotonic = True
-    prev = -1
-    for page in pages:
-        if page.granule < 0:
-            continue
-        if page.granule < prev:
-            monotonic = False
+    for serial, stream_pages in streams.items():
+        prev = -1
+        for p in stream_pages:
+            if p.granule < 0:
+                continue
+            if p.granule < prev:
+                monotonic = False
+                break
+            prev = p.granule
+        if not monotonic:
             break
-        prev = page.granule
 
-    declared = (last.granule / rate) if last.granule >= 0 else None
-    if not monotonic and real_max > (last.granule if last.granule >= 0 else 0):
-        full_audio = real_max / rate
+    # Stream 1 is what players stopping at the first EOS (Discord/Chromium) play
+    s1_pages = streams[pages[0].serial]
+    s1_eos = [p for p in s1_pages if p.is_eos]
+    s1_last = s1_eos[-1] if s1_eos else s1_pages[-1]
+    declared = (s1_last.granule / rate) if s1_last.granule >= 0 else None
+
+    # Total duration across all streams
+    if len(streams) > 1:
+        total_audio = 0.0
+        for s, sp in streams.items():
+            eos_p = [p for p in sp if p.is_eos]
+            last_p = eos_p[-1] if eos_p else sp[-1]
+            if last_p.granule >= 0:
+                total_audio += last_p.granule / rate
+        full_audio = total_audio
     else:
-        full_audio = declared
+        real_granules = [p.granule for p in pages[:-1] if p.granule >= 0]
+        real_max = max(real_granules) if real_granules else 0
+        last = pages[-1]
+        if not monotonic and real_max > (last.granule if last.granule >= 0 else 0):
+            full_audio = real_max / rate
+        else:
+            full_audio = declared
 
     return {
         "codec": codec,
@@ -240,9 +262,10 @@ def describe(data: bytes) -> Dict:
         "serial": pages[0].serial,
         "declared_seconds": declared,
         "full_audio_seconds": full_audio,
-        "last_page_is_eos": last.is_eos,
+        "last_page_is_eos": pages[-1].is_eos,
         "granules_monotonic": monotonic,
         "all_crcs_valid": all(page_crc_valid(data, p) for p in pages),
+        "chained_streams": len(streams),
     }
 
 

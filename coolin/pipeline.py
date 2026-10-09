@@ -112,6 +112,15 @@ def default_output_path(
     return os.path.join(directory, base + ".ogg")
 
 
+def safe_encode_duration(seconds: float) -> float:
+    """Adjust duration to account for Opus encoder 312-sample preskip padding (6.5ms @ 48kHz).
+    Guarantees the encoded audio duration strictly stays <= MAX_SECONDS (00:06:59.00).
+    """
+    if seconds >= MAX_SECONDS:
+        return max(0.1, MAX_SECONDS - (312 / 48000))
+    return seconds
+
+
 def craft(
     input_path: str,
     output_path: Optional[str] = None,
@@ -126,7 +135,8 @@ def craft(
     Stream 1 plays for the specified duration (up to 6 minutes and 59 seconds)
     and terminates with an EOS boundary so Discord stops playback at the
     specified song length, while Stream 2 carries the remainder of the song
-    (up to the 6m 59s maximum length) so VLC and full demuxers play the entire track.
+    (up to the 6m 59s maximum length) with valid monotonic granules so VLC
+    and full demuxers play the entire track without platform duration errors.
     Ensures the asset name length does not exceed 50 characters.
     """
     input_path = os.path.abspath(input_path)
@@ -182,8 +192,9 @@ def craft(
             f"[3/4] Song length ({song_max:.2f}s) <= target duration ({target_seconds:.2f}s); "
             f"converting clean single stream (capped at {ogg_util.format_seconds(song_max)})..."
         )
+        enc_dur = safe_encode_duration(song_max)
         encoder = ffmpeg_util.convert_to_ogg(
-            exe, input_path, output_path, codec, duration=song_max, log=log
+            exe, input_path, output_path, codec, duration=enc_dur, log=log
         )
         with open(output_path, "rb") as handle:
             out_data = handle.read()
@@ -207,8 +218,13 @@ def craft(
                 exe, input_path, tmp_s1, codec, duration=target_seconds, log=log
             )
             rem_dur = song_max - target_seconds
+            enc_rem = (
+                safe_encode_duration(song_max) - target_seconds
+                if song_max >= MAX_SECONDS
+                else rem_dur
+            )
             ffmpeg_util.convert_to_ogg(
-                exe, input_path, tmp_s2, codec, start_time=target_seconds, duration=rem_dur, log=log
+                exe, input_path, tmp_s2, codec, start_time=target_seconds, duration=enc_rem, log=log
             )
             with open(tmp_s1, "rb") as h1:
                 s1_data = h1.read()
@@ -216,13 +232,17 @@ def craft(
                 s2_data = h2.read()
 
             combined = s1_data + s2_data
-            patched, info = ogg_util.inject_fake_duration(combined, target_seconds)
             with open(output_path, "wb") as handle:
-                handle.write(patched)
+                handle.write(combined)
 
-            out_codec = info["codec"]
-            actual_seconds = song_max
-            declared_seconds = info["declared_seconds"]
+            s1_pages = ogg_util.parse_pages(s1_data)
+            s2_pages = ogg_util.parse_pages(s2_data)
+            out_codec, s1_rate = ogg_util.detect_codec(s1_data, s1_pages)
+            _, s2_rate = ogg_util.detect_codec(s2_data, s2_pages)
+            s1_dur = s1_pages[-1].granule / s1_rate
+            s2_dur = s2_pages[-1].granule / s2_rate
+            declared_seconds = s1_dur
+            actual_seconds = s1_dur + s2_dur
         finally:
             for p in (tmp_s1, tmp_s2):
                 try:
@@ -261,7 +281,10 @@ def verify(path: str, log: Callable[[str], None] = print) -> dict:
     log(f"Last page EOS flag:  {report['last_page_is_eos']}")
     log(f"Granules monotonic:  {report['granules_monotonic']}")
     log(f"All page CRCs valid: {report['all_crcs_valid']}")
-    if report["declared_seconds"] is not None and report["full_audio_seconds"]:
+    if report.get("chained_streams", 1) > 1:
+        log(f"Chained streams:     {report['chained_streams']}")
+        log("Verdict:             Coolin-crafted multi-stream file (Discord stops at Stream 1, VLC plays full song).")
+    elif report["declared_seconds"] is not None and report["full_audio_seconds"]:
         if not report["granules_monotonic"] and report["full_audio_seconds"] > report["declared_seconds"]:
             log("Verdict:             Coolin-crafted file (fake short duration).")
         else:
