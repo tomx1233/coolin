@@ -1,0 +1,4 @@
+# Bundles a static ffmpeg binary, so Coolin works out of the box on Windows
+# (no manual ffmpeg install needed). Harmless if you already have ffmpeg on
+# your PATH - Coolin prefers the system ffmpeg when it finds one.
+imageio-ffmpeg>=0.5.1
