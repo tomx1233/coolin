@@ -1,61 +1,70 @@
 # Coolin 🎧
 
-**Audio file inserter → Multi-stream OGG converter for Discord and VLC.**
+**Audio file inserter → Game-compatible & Discord OGG converter.**
 
 Coolin takes any audio file you insert (MP3, WAV, FLAC, M4A, …) and converts it
-into a chained multi-stream OGG file designed so that:
+using specialized game-compatible and preview methods:
 
-| Player | What happens |
+| Method | What happens |
 | --- | --- |
-| **Discord's audio player** | Plays only the specified duration (default: **2.0s**), then stops at the stream boundary. |
-| **VLC / full demuxers** | Play the entire song (up to the **6 minutes and 59 seconds** max limit). |
+| **`invert` (Phase Invert)** | Stereo channels are placed 180° out of phase (`L = +audio, R = -audio`). When played in mono (e.g. web previews, moderation checks), the channels cancel to complete silence (-91 dB). Plays normally in-game / stereo. |
+| **`speed` (Speed Invert)** | The audio is sped up so the physical file duration matches the proclaimed duration (e.g. 2.0s). Cannot play past the proclaimed seconds in Discord, and cannot trigger platform "audio duration too long" errors. In game, `Sound.PlaybackSpeed = 1/factor` plays the full song at 100% normal pitch. |
+| **`invert_speed` (Combined)** | Both phase-inverted (silent in mono preview) AND sped up (short physical duration, cannot exceed length caps). |
+| **`multistream`** | Chained multi-stream OGG (Stream 1 stops at Discord 2s EOS; Stream 2 carries remainder for VLC). |
 
-## How it works
+## How the Invert & Game Methods Work
 
-1. **Stream 1 (Discord Preview)**: The first part of the audio is encoded for the specified duration (default: 2.0s, up to 6:59 / 419s) and explicitly terminates with an OGG `EOS` (end-of-stream) page boundary.
-2. **Stream 2 (Full Song Remainder)**: The remaining audio of the track is encoded into a chained secondary logical bitstream (up to a maximum total length of 6 minutes and 59 seconds).
-3. **Container Surgery**: The container's declared duration is matched to the proclaimed duration. Discord's embedded Chromium player stops at the Stream 1 EOS boundary, while VLC seamlessly continues into Stream 2 to play the entire song.
-4. **Limits & Format Support**: Accepts duration inputs in seconds (`2.0`, `419`) or `MM:SS` (`6:59`). The maximum allowed duration and total song length is **6 minutes and 59 seconds** (419.0s).
+### 1. Phase Inversion Method (`invert`)
+- Audio channels are configured with opposite polarity (`c0=c0`, `c1=-1*c0`).
+- When downmixed to mono by moderation scanners, web previewers, or single-speaker previews, `L + R` sums to zero (-91 dB attenuation).
+- In-game (Roblox / 3D audio space or stereo), both channels are rendered distinctly without cancellation.
+
+### 2. Speed Invert Method (`speed`)
+- When uploading to platforms with short duration caps (e.g. 2s, 6s, 10s), the track is sped up by a known factor $N$ (e.g. $4\times, 8\times$, or matched to target duration).
+- The exported file duration physically stops at the proclaimed seconds (e.g. 2.0s), making it impossible for Discord to play past 2 seconds or for uploaders to flag "audio duration too long".
+- In game, paste the one-line Lua script into your Sound object:
+  ```lua
+  local sound = script.Parent
+  sound.PlaybackSpeed = 0.25 -- (where 0.25 = 1 / 4x speed)
+  sound:Play()
+  ```
+  The game's audio engine stretches the track back out to its full duration (up to 6:59) at 100% normal pitch and speed.
 
 ## Requirements
 
 - Python 3.8+ (tkinter ships with the standard Windows installer)
-- Nothing else — the dependency below bundles ffmpeg:
+- Bundles ffmpeg via `imageio-ffmpeg`:
 
 ```bat
 pip install -r requirements.txt
 ```
 
-`requirements.txt` installs [`imageio-ffmpeg`](https://pypi.org/project/imageio-ffmpeg/),
-which ships a static ffmpeg binary, so **you do not need to install ffmpeg
-yourself on Windows**. If you already have ffmpeg on your PATH, Coolin uses
-that one instead.
-
 ## Using the GUI (Windows)
 
 Double-click **`run_gui.bat`** (or run `python coolin_gui.py`):
 
-1. **Insert audio file(s)** — add one or more songs (any format ffmpeg understands).
-2. Pick the output folder (or keep *"write next to each input file"*).
-3. Set the **Discord duration** in seconds (default `2.0`, max `6:59` / `419.0s`)
-   and the codec (`auto` keeps Opus, the recommended choice).
+1. **Insert audio file(s)** — add one or more songs.
+2. Select your **Method** (`invert`, `speed`, `invert_speed`, or `multistream`).
+3. Set the target duration or speed multiplier (max `6:59` / `419.0s`).
 4. Press **Convert to Discord OGG**.
-
-Outputs are named `<original name>_discord.ogg`.
+5. Copy the generated in-game playback script directly from the log output!
 
 ## Using the CLI
 
 ```bat
-:: convert with defaults (2.0s duration, Opus)
-python coolin_cli.py song.mp3
+:: Invert method (inaudible/cancels in mono, plays in game)
+python coolin_cli.py song.mp3 -m invert
 
-:: choose output path and duration (supports seconds or MM:SS up to 6:59)
-python coolin_cli.py song.mp3 -o output.ogg -d 6:59
+:: Speed method (physically 2 seconds long, full playback in game)
+python coolin_cli.py song.mp3 -m speed -d 2
 
-:: batch + force Vorbis codec
-python coolin_cli.py a.mp3 b.flac -d 3 --codec vorbis
+:: Invert + Speed combined
+python coolin_cli.py song.mp3 -m invert_speed -d 2
 
-:: inspect an OGG file
+:: Custom speed multiplier (e.g. 4x speed -> in-game PlaybackSpeed 0.25)
+python coolin_cli.py song.mp3 -m speed -s 4.0
+
+:: Inspect an OGG file
 python coolin_cli.py --verify song_discord.ogg
 ```
 

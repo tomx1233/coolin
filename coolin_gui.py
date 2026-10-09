@@ -100,10 +100,24 @@ class CoolinApp(tk.Tk):
         ttk.Label(options_frame, text="max 50 chars (Roblox/Discord limit)").grid(
             row=2, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
-        ttk.Label(options_frame, text="Discord duration (max 6:59):").grid(
-            row=3, column=0, sticky="w", padx=8, pady=(4, 8))
+        ttk.Label(options_frame, text="Method:").grid(
+            row=3, column=0, sticky="w", padx=8, pady=(4, 4))
+        self.method_var = tk.StringVar(value=pipeline.METHOD_INVERT)
+        ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
+                     values=(
+                         pipeline.METHOD_INVERT,
+                         pipeline.METHOD_SPEED,
+                         pipeline.METHOD_INVERT_SPEED,
+                         pipeline.METHOD_MULTISTREAM,
+                     ),
+                     state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
+        ttk.Label(options_frame, text="invert = inaudible in mono, speed = short file").grid(
+            row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+
+        ttk.Label(options_frame, text="Duration / Limit (max 6:59):").grid(
+            row=4, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
-        controls.grid(row=3, column=1, columnspan=2, sticky="w",
+        controls.grid(row=4, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
         self.seconds_var = tk.StringVar(value=str(pipeline.DEFAULT_FAKE_SECONDS))
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
@@ -224,13 +238,13 @@ class CoolinApp(tk.Tk):
             target=self._worker,
             args=(files, seconds, self.codec_var.get(),
                   self.same_folder_var.get(), self.output_dir_var.get().strip(),
-                  raw_asset_name),
+                  raw_asset_name, self.method_var.get()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method) -> None:
         succeeded = 0
         for index, input_path in enumerate(files, 1):
             self.log_queue.put(
@@ -253,6 +267,7 @@ class CoolinApp(tk.Tk):
                     output_path=output_path,
                     fake_seconds=seconds,
                     codec=codec,
+                    method=method,
                     asset_name=single_name,
                     log=self.log_queue.put,
                 )

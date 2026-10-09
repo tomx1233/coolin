@@ -101,22 +101,26 @@ def convert_to_ogg(
     preferred_codec: str = "auto",
     duration: Optional[float] = None,
     start_time: Optional[float] = None,
+    audio_filter: Optional[str] = None,
     log=print,
 ) -> str:
     """Transcode *input_path* to an Ogg file; returns the encoder used.
     If *start_time* is provided, starts transcoding from that offset.
     If *duration* is provided, limits output to that length.
+    If *audio_filter* is provided, applies audio filter(s).
     """
     encoders = available_encoders(exe)
     encoder = pick_encoder(preferred_codec, encoders)
     seek_args = ["-ss", str(start_time)] if start_time is not None else []
     duration_args = ["-t", str(duration)] if duration is not None else []
+    filter_args = ["-af", audio_filter] if audio_filter else []
     cmd = (
         [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
         + seek_args
         + ["-i", input_path]
         + duration_args
         + ["-map", "0:a:0", "-vn"]
+        + filter_args
         + encoder_args(encoder)
         + ["-f", "ogg", output_path]
     )

@@ -40,6 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
              f"(default: {pipeline.DEFAULT_FAKE_SECONDS}, max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
     )
     parser.add_argument(
+        "-m", "--method",
+        choices=("invert", "speed", "invert_speed", "multistream"),
+        default=pipeline.METHOD_INVERT,
+        help=(
+            "conversion method: 'invert' (phase inversion: cancels to silence in mono/preview, "
+            "plays in-game), 'speed' (playback speed invert: short physical file, plays full song "
+            "in-game via Sound.PlaybackSpeed), 'invert_speed' (both), or 'multistream' "
+            "(chained OGG). Default: invert"
+        ),
+    )
+    parser.add_argument(
+        "-s", "--speed-factor", type=float, default=None,
+        help="speed multiplier for 'speed' / 'invert_speed' method (e.g. 4.0 for 4x). "
+             "Default: auto-calculated from --seconds",
+    )
+    parser.add_argument(
         "--codec", choices=("auto", "opus", "vorbis"), default="auto",
         help="Ogg codec to encode with (default: auto -> prefers Opus)",
     )
@@ -86,6 +102,8 @@ def main(argv=None) -> int:
                 output_path=args.output,
                 fake_seconds=seconds,
                 codec=args.codec,
+                method=args.method,
+                speed_factor=args.speed_factor,
                 asset_name=args.asset_name,
             )
         except Exception as exc:

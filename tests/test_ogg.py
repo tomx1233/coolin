@@ -179,6 +179,7 @@ class OggCraftingTest(unittest.TestCase):
             self.wav_path,
             output_path=craft_out,
             fake_seconds=2.0,
+            method="multistream",
             log=lambda _: None,
         )
         self.assertTrue(os.path.isfile(craft_out))
@@ -258,6 +259,37 @@ class OggCraftingTest(unittest.TestCase):
         out_stem = os.path.splitext(os.path.basename(result.output_path))[0]
         self.assertLessEqual(len(out_stem), 50)
         self.assertGreaterEqual(len(out_stem), 1)
+
+    def test_invert_method_mono_cancellation(self):
+        """Invert method must produce phase-inverted stereo that cancels out to near silence in mono."""
+        out_path = os.path.join(self.tmpdir.name, "tone_invert.ogg")
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="invert", log=lambda _: None)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertIn("Invert Method", res.in_game_script)
+        self.assertIn("sound:Play()", res.in_game_script)
+
+        # Check mono cancellation
+        cmd = [self.ffmpeg, "-hide_banner", "-y", "-i", out_path, "-af", "pan=mono|c0=0.5*c0+0.5*c1,volumedetect", "-f", "null", "-"]
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        mean_vol = None
+        for line in p.stderr.splitlines():
+            if "mean_volume:" in line:
+                mean_vol = float(line.split("mean_volume:")[1].split("dB")[0].strip())
+        self.assertIsNotNone(mean_vol)
+        self.assertLess(mean_vol, -50.0, "Mono downmix must have at least 50 dB attenuation due to phase cancellation")
+
+    def test_speed_method_physically_short_duration(self):
+        """Speed method must physically truncate duration to target seconds and provide in-game PlaybackSpeed script."""
+        out_path = os.path.join(self.tmpdir.name, "tone_speed.ogg")
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="speed", fake_seconds=2.0, log=lambda _: None)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertAlmostEqual(res.declared_seconds, 2.0, delta=0.5)
+        self.assertIn("PlaybackSpeed", res.in_game_script)
+
+        # Verify probe sees the physically short duration (cannot play past 2s)
+        dur = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
+        self.assertIsNotNone(dur)
+        self.assertAlmostEqual(dur, 2.0, delta=0.5)
 
 
 if __name__ == "__main__":
