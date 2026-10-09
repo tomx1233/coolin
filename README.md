@@ -1,26 +1,21 @@
 # Coolin 🎧
 
-**Audio file inserter → OGG converter with accurate playback duration for Discord.**
+**Audio file inserter → Multi-stream OGG converter for Discord and VLC.**
 
 Coolin takes any audio file you insert (MP3, WAV, FLAC, M4A, …) and converts it
-to an OGG file that actually stops playing at the specified duration (default: **2 seconds**,
-maximum: **6 minutes and 59 seconds** / **419 seconds**) when played in Discord.
+into a chained multi-stream OGG file designed so that:
 
-The result stops cleanly at the specified song length instead of continuing to play.
-
-It is a Python application with both a **GUI** and a **CLI**, and it runs on
-Windows out of the box.
+| Player | What happens |
+| --- | --- |
+| **Discord's audio player** | Plays only the specified duration (default: **2.0s**), then stops at the stream boundary. |
+| **VLC / full demuxers** | Play the entire song (up to the **6 minutes and 59 seconds** max limit). |
 
 ## How it works
 
-1. Coolin transcodes your input audio to a clean OGG stream (Opus preferred —
-   that is what Discord natively supports).
-2. The audio stream is trimmed to the specified duration (up to the maximum of
-   6 minutes and 59 seconds), ensuring the stream terminates with an EOS
-   (end-of-stream) page at that exact point so Discord's audio player actually
-   stops playback instead of continuing.
-3. Durations can be entered as seconds (e.g. `2.0`, `419`) or `MM:SS` format
-   (e.g. `6:59`).
+1. **Stream 1 (Discord Preview)**: The first part of the audio is encoded for the specified duration (default: 2.0s, up to 6:59 / 419s) and explicitly terminates with an OGG `EOS` (end-of-stream) page boundary.
+2. **Stream 2 (Full Song Remainder)**: The remaining audio of the track is encoded into a chained secondary logical bitstream (up to a maximum total length of 6 minutes and 59 seconds).
+3. **Container Surgery**: The container's declared duration is matched to the proclaimed duration. Discord's embedded Chromium player stops at the Stream 1 EOS boundary, while VLC seamlessly continues into Stream 2 to play the entire song.
+4. **Limits & Format Support**: Accepts duration inputs in seconds (`2.0`, `419`) or `MM:SS` (`6:59`). The maximum allowed duration and total song length is **6 minutes and 59 seconds** (419.0s).
 
 ## Requirements
 

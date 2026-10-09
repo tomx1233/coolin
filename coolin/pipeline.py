@@ -74,9 +74,11 @@ def craft(
     *,
     duration_seconds: Optional[float] = None,
 ) -> CraftResult:
-    """Convert *input_path* into an OGG whose audio is stopped/trimmed at
-    the specified duration (up to 6 minutes and 59 seconds), so Discord's
-    audio player actually stops playing at the specified song length.
+    """Convert *input_path* into a multi-stream Discord OGG file:
+    Stream 1 plays for the specified duration (up to 6 minutes and 59 seconds)
+    and terminates with an EOS boundary so Discord stops playback at the
+    specified song length, while Stream 2 carries the remainder of the song
+    (up to the 6m 59s maximum length) so VLC and full demuxers play the entire track.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -94,32 +96,96 @@ def craft(
     exe = ffmpeg_util.find_ffmpeg()
     log(f"      using {exe}")
 
-    log(
-        f"[2/4] Converting {os.path.basename(input_path)} to OGG "
-        f"(stopping at {ogg_util.format_seconds(target_seconds)})..."
-    )
-    encoder = ffmpeg_util.convert_to_ogg(
-        exe, input_path, output_path, codec, duration=target_seconds, log=log
-    )
+    log(f"[2/4] Analyzing input audio duration...")
+    total_dur = ffmpeg_util.probe_duration(exe, input_path)
+    if total_dur is None:
+        tmp_probe_fd, tmp_probe_path = tempfile.mkstemp(suffix=".probe.ogg")
+        os.close(tmp_probe_fd)
+        try:
+            ffmpeg_util.convert_to_ogg(
+                exe, input_path, tmp_probe_path, codec, duration=MAX_SECONDS, log=lambda _: None
+            )
+            with open(tmp_probe_path, "rb") as h:
+                p_data = h.read()
+            p_pages = ogg_util.parse_pages(p_data)
+            _, p_rate = ogg_util.detect_codec(p_data, p_pages)
+            total_dur = p_pages[-1].granule / p_rate
+        finally:
+            try:
+                os.remove(tmp_probe_path)
+            except OSError:
+                pass
 
-    log(f"[3/4] Verifying generated OGG container...")
-    with open(output_path, "rb") as handle:
-        out_data = handle.read()
-    pages = ogg_util.parse_pages(out_data)
-    out_codec, rate = ogg_util.detect_codec(out_data, pages)
-    actual_seconds = pages[-1].granule / rate
+    song_max = min(total_dur, MAX_SECONDS) if total_dur else MAX_SECONDS
+
+    if target_seconds >= song_max:
+        log(
+            f"[3/4] Song length ({song_max:.2f}s) <= target duration ({target_seconds:.2f}s); "
+            f"converting clean single stream (capped at {ogg_util.format_seconds(song_max)})..."
+        )
+        encoder = ffmpeg_util.convert_to_ogg(
+            exe, input_path, output_path, codec, duration=song_max, log=log
+        )
+        with open(output_path, "rb") as handle:
+            out_data = handle.read()
+        pages = ogg_util.parse_pages(out_data)
+        out_codec, rate = ogg_util.detect_codec(out_data, pages)
+        actual_seconds = pages[-1].granule / rate
+        declared_seconds = actual_seconds
+    else:
+        log(
+            f"[3/4] Building multi-stream Discord OGG: "
+            f"Stream 1 (0 to {target_seconds:.2f}s, Discord stops here), "
+            f"Stream 2 ({target_seconds:.2f}s to {song_max:.2f}s, VLC full audio)..."
+        )
+        tmp_dir = os.path.dirname(output_path) or "."
+        fd1, tmp_s1 = tempfile.mkstemp(suffix=".s1.ogg", dir=tmp_dir)
+        os.close(fd1)
+        fd2, tmp_s2 = tempfile.mkstemp(suffix=".s2.ogg", dir=tmp_dir)
+        os.close(fd2)
+        try:
+            encoder = ffmpeg_util.convert_to_ogg(
+                exe, input_path, tmp_s1, codec, duration=target_seconds, log=log
+            )
+            rem_dur = song_max - target_seconds
+            ffmpeg_util.convert_to_ogg(
+                exe, input_path, tmp_s2, codec, start_time=target_seconds, duration=rem_dur, log=log
+            )
+            with open(tmp_s1, "rb") as h1:
+                s1_data = h1.read()
+            with open(tmp_s2, "rb") as h2:
+                s2_data = h2.read()
+
+            combined = s1_data + s2_data
+            patched, info = ogg_util.inject_fake_duration(combined, target_seconds)
+            with open(output_path, "wb") as handle:
+                handle.write(patched)
+
+            out_codec = info["codec"]
+            actual_seconds = song_max
+            declared_seconds = info["declared_seconds"]
+        finally:
+            for p in (tmp_s1, tmp_s2):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
     log(f"[4/4] Wrote {output_path}")
     log(
-        f"      Discord will stop playing after "
-        f"{ogg_util.format_seconds(actual_seconds)}."
+        f"      Discord will stop after "
+        f"{ogg_util.format_seconds(declared_seconds)} (end of stream 1)."
+    )
+    log(
+        f"      VLC will play the full "
+        f"{ogg_util.format_seconds(actual_seconds)} song."
     )
     return CraftResult(
         output_path=output_path,
         encoder=encoder,
         codec=out_codec,
         actual_seconds=actual_seconds,
-        declared_seconds=actual_seconds,
+        declared_seconds=declared_seconds,
     )
 
 

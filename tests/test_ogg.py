@@ -172,8 +172,8 @@ class OggCraftingTest(unittest.TestCase):
                     pipeline.parse_duration(invalid)
 
     def test_craft_stops_at_specified_duration(self):
-        """Crafted output must actually stop at the specified duration (e.g. 2.0s),
-        not continuing playback of the 6.0s input."""
+        """Crafted output must declare the specified duration (e.g. 2.0s) and end
+        Stream 1 with an EOS boundary so Discord stops, while keeping full audio for VLC."""
         craft_out = os.path.join(self.tmpdir.name, "tone_crafted_2s.ogg")
         result = pipeline.craft(
             self.wav_path,
@@ -182,19 +182,23 @@ class OggCraftingTest(unittest.TestCase):
             log=lambda _: None,
         )
         self.assertTrue(os.path.isfile(craft_out))
-        self.assertAlmostEqual(result.actual_seconds, 2.0, delta=0.1)
         self.assertAlmostEqual(result.declared_seconds, 2.0, delta=0.1)
+        self.assertAlmostEqual(result.actual_seconds, TONE_SECONDS, delta=0.5)
 
-        # Probe duration must match ~2.0s
-        probed = ffmpeg_util.probe_duration(self.ffmpeg, craft_out)
-        self.assertIsNotNone(probed)
-        self.assertAlmostEqual(probed, 2.0, delta=0.1)
+        # OGG pages must have Stream 1 ending with EOS flag and Stream 2 starting with BOS flag
+        data = self._read(craft_out)
+        pages = ogg_util.parse_pages(data)
+        self.assertTrue(all(ogg_util.page_crc_valid(data, p) for p in pages))
+        # Find stream transition
+        bos_pages = [i for i, p in enumerate(pages) if p.is_bos]
+        self.assertGreaterEqual(len(bos_pages), 2, "Must contain chained streams for multi-stream trick")
+        stream1_last_idx = bos_pages[1] - 1
+        self.assertTrue(pages[stream1_last_idx].is_eos, "Stream 1 must end with EOS page")
 
-        # Full decode must only produce ~2.0s worth of audio bytes, not 6.0s!
+        # Full VLC-style decode still produces the full audio
         pcm_bytes = ffmpeg_util.decoded_pcm_bytes(self.ffmpeg, craft_out)
         decoded_seconds = pcm_bytes / (48000 * 2 * 2)
-        self.assertAlmostEqual(decoded_seconds, 2.0, delta=0.1)
-        self.assertLess(decoded_seconds, 3.0)
+        self.assertGreater(decoded_seconds, TONE_SECONDS * 0.85)
 
     def test_craft_rejects_exceeding_max_duration(self):
         """Craft must reject durations longer than 6 min 59 seconds (419s)."""
