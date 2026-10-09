@@ -169,5 +169,26 @@ def decoded_pcm_bytes(exe: str, path: str) -> int:
     return len(result.stdout)
 
 
+def decode_duration(exe: str, path: str) -> float:
+    """Fully decode *path* (forced to 48 kHz stereo s16le) and return the
+    length in seconds of the audio that is *really* inside the file.
+
+    Unlike probe_duration (which reads metadata), this decodes every packet,
+    so it sees through declared-duration tricks.
+    """
+    result = subprocess.run(
+        [exe, "-hide_banner", "-loglevel", "error", "-i", path,
+         "-vn", "-ar", "48000", "-ac", "2", "-f", "s16le", "-"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg could not fully decode the file:\n"
+            + result.stderr.decode("utf-8", "replace").strip()
+        )
+    return len(result.stdout) / (48000 * 2 * 2)
+
+
 def _quote(arg: str) -> str:
     return f'"{arg}"' if " " in arg else arg

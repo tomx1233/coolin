@@ -109,9 +109,10 @@ class CoolinApp(tk.Tk):
                          pipeline.METHOD_SPEED,
                          pipeline.METHOD_INVERT_SPEED,
                          pipeline.METHOD_MULTISTREAM,
+                         pipeline.METHOD_SPOOF,
                      ),
                      state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
-        ttk.Label(options_frame, text="invert = inaudible in mono, speed = short file").grid(
+        ttk.Label(options_frame, text="spoof = Roblox sees a short song, full song inside").grid(
             row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Duration / Limit (max 6:59):").grid(
@@ -143,9 +144,9 @@ class CoolinApp(tk.Tk):
                                      font=("Consolas", 9))
         self.log_text.pack(fill="both", expand=True, **pad)
         self.log(
-            "Insert one or more audio files and press Convert.\n"
-            "Converts audio to Discord-compatible OGG files that actually stop "
-            "playing after the specified duration (up to 6 minutes and 59 seconds)."
+            "Insert one or more audio files, pick a Method, and press Convert.\n"
+            "invert: silent in mono previews  |  speed: physically short file, restored in game\n"
+            "spoof: Roblox sees a short song, full song inside  |  multistream: Discord stops early, VLC plays all"
         )
 
         # -- status bar -------------------------------------------------------------

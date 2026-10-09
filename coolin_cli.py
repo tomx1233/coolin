@@ -41,13 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("invert", "speed", "invert_speed", "multistream"),
+        choices=("invert", "speed", "invert_speed", "multistream", "spoof"),
         default=pipeline.METHOD_INVERT,
         help=(
             "conversion method: 'invert' (phase inversion: cancels to silence in mono/preview, "
             "plays in-game), 'speed' (playback speed invert: short physical file, plays full song "
-            "in-game via Sound.PlaybackSpeed), 'invert_speed' (both), or 'multistream' "
-            "(chained OGG). Default: invert"
+            "in-game via Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' "
+            "(chained OGG), or 'spoof' (fakes the declared duration so Roblox thinks it's a "
+            "short song while the full song stays inside and plays in-game). Default: invert"
         ),
     )
     parser.add_argument(

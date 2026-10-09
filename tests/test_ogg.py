@@ -37,6 +37,19 @@ def make_tone_wav(path: str, seconds: float = TONE_SECONDS, rate: int = 44100) -
         handle.writeframes(bytes(frames))
 
 
+def make_long_wav(path: str, seconds: float = 425.0, rate: int = 8000) -> None:
+    """Write a mono WAV longer than the 6:59 upload limit (small + fast)."""
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        chunk = bytearray()
+        for i in range(rate):  # one second of a 440 Hz tone, tiled
+            chunk += struct.pack("<h", int(10000 * math.sin(2 * math.pi * 440 * i / rate)))
+        for _ in range(int(seconds)):
+            handle.writeframes(bytes(chunk))
+
+
 class OggCraftingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -290,6 +303,74 @@ class OggCraftingTest(unittest.TestCase):
         dur = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
         self.assertIsNotNone(dur)
         self.assertAlmostEqual(dur, 2.0, delta=0.5)
+
+    def test_spoof_duration_rescales_granules_monotonically(self):
+        """spoof_duration must shrink the declared duration while keeping every
+        granule monotonic (no unsigned-underflow 'duration too long' risk)."""
+        data = self._read(self.opus_path)
+        patched, info = ogg_util.spoof_duration(data, FAKE_SECONDS)
+
+        pages = ogg_util.parse_pages(patched)
+        for page in pages:
+            self.assertTrue(ogg_util.page_crc_valid(patched, page))
+
+        granules = [p.granule for p in pages if p.granule >= 0]
+        self.assertTrue(all(a <= b for a, b in zip(granules, granules[1:])),
+                        "granules must stay monotonic after the rescale")
+        self.assertLessEqual(granules[-1], int(round(48000 * FAKE_SECONDS)))
+        self.assertAlmostEqual(info["declared_seconds"], FAKE_SECONDS, delta=0.05)
+        self.assertGreater(info["actual_seconds"], TONE_SECONDS * 0.9)
+
+        # Page bodies/lacing are untouched; only granule + CRC fields changed.
+        for old, new in zip(ogg_util.parse_pages(data), pages):
+            self.assertEqual(old.lacing, new.lacing)
+            self.assertEqual(old.body_size, new.body_size)
+
+        # Fake duration must be shorter than the real audio.
+        with self.assertRaises(ValueError):
+            ogg_util.spoof_duration(data, TONE_SECONDS + 10)
+
+    def test_spoof_method_fools_scanners_but_keeps_full_song(self):
+        """Spoof method: metadata scanners see the short declared duration,
+        but decoding the file still yields the complete song."""
+        out_path = os.path.join(self.tmpdir.name, "tone_spoof.ogg")
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="spoof",
+                             fake_seconds=2.0, log=lambda _: None)
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertAlmostEqual(res.declared_seconds, 2.0, delta=0.5)
+        self.assertGreater(res.actual_seconds, TONE_SECONDS * 0.9)
+        self.assertIn("Spoof Method", res.in_game_script)
+        self.assertIn("sound:Play()", res.in_game_script)
+
+        # What a metadata scanner (upload validation) sees: the fake duration.
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, 2.0, delta=0.5)
+
+        # What a full decode (the in-game player) gets: the whole song.
+        decoded = ffmpeg_util.decode_duration(self.ffmpeg, out_path)
+        self.assertGreater(decoded, TONE_SECONDS * 0.85)
+
+        report = ogg_util.describe(self._read(out_path))
+        self.assertTrue(report["granules_monotonic"])
+        self.assertTrue(report["all_crcs_valid"])
+
+    def test_spoof_method_allows_songs_longer_than_upload_limit(self):
+        """Spoof method must NOT cap the real audio at 6:59 - a song longer
+        than the platform limit still goes in whole, just declared short."""
+        long_wav = os.path.join(self.tmpdir.name, "long_song.wav")
+        make_long_wav(long_wav, seconds=425.0)
+        out_path = os.path.join(self.tmpdir.name, "long_song_spoof.ogg")
+        res = pipeline.craft(long_wav, output_path=out_path, method="spoof",
+                             fake_seconds=10.0, log=lambda _: None)
+        self.assertGreater(res.actual_seconds, pipeline.MAX_SECONDS,
+                           "the full 425s song must survive (no 6:59 cap for spoof)")
+        self.assertLessEqual(res.declared_seconds, 10.0)
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
+        self.assertIsNotNone(probed)
+        self.assertLess(probed, 10.1)
+        decoded = ffmpeg_util.decode_duration(self.ffmpeg, out_path)
+        self.assertGreater(decoded, pipeline.MAX_SECONDS)
 
 
 if __name__ == "__main__":

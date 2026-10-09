@@ -22,7 +22,14 @@ METHOD_INVERT = "invert"
 METHOD_SPEED = "speed"
 METHOD_INVERT_SPEED = "invert_speed"
 METHOD_MULTISTREAM = "multistream"
-SUPPORTED_METHODS = (METHOD_INVERT, METHOD_SPEED, METHOD_INVERT_SPEED, METHOD_MULTISTREAM)
+METHOD_SPOOF = "spoof"
+SUPPORTED_METHODS = (
+    METHOD_INVERT,
+    METHOD_SPEED,
+    METHOD_INVERT_SPEED,
+    METHOD_MULTISTREAM,
+    METHOD_SPOOF,
+)
 
 
 def sanitize_asset_name(name: str, max_length: int = MAX_ASSET_NAME_LENGTH) -> str:
@@ -151,6 +158,10 @@ def craft(
       for duration. In game, Sound.PlaybackSpeed = 1/factor plays the full song at 100% normal pitch.
     - 'invert_speed': Combines both Phase Inversion and Speed Inversion.
     - 'multistream': Chained multi-stream OGG (Stream 1 2s EOS + Stream 2 full track).
+    - 'spoof': Fake-duration method for platform uploads. Every Ogg granule is rescaled so
+      metadata scanners (upload validation) believe the file is only *fake_seconds* long, while
+      the complete song - which may be longer than any duration limit - stays inside untouched
+      and plays in full in game.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -274,6 +285,42 @@ def craft(
             f"sound.Volume = 1.0\n"
             f"sound:Play()\n"
         )
+    elif method == METHOD_SPOOF:
+        log(
+            f"[3/4] Applying Spoof Method: metadata will declare "
+            f"{ogg_util.format_seconds(target_seconds)} while the full song stays inside..."
+        )
+        # Encode the COMPLETE song with no duration cap - the whole point of
+        # this method is that the real audio may exceed any platform limit.
+        encoder = ffmpeg_util.convert_to_ogg(
+            exe, input_path, output_path, codec, log=log
+        )
+        with open(output_path, "rb") as handle:
+            out_data = handle.read()
+        pages = ogg_util.parse_pages(out_data)
+        out_codec, rate = ogg_util.detect_codec(out_data, pages)
+        actual_seconds = pages[-1].granule / rate
+        if target_seconds < actual_seconds:
+            out_data, spoof_info = ogg_util.spoof_duration(out_data, target_seconds)
+            with open(output_path, "wb") as handle:
+                handle.write(out_data)
+            declared_seconds = spoof_info["declared_seconds"]
+            log(
+                f"      Rescaled {spoof_info['rewritten_granules']} granule positions: "
+                f"scanners now see {ogg_util.format_seconds(declared_seconds)}."
+            )
+        else:
+            # Song is already shorter than the target - nothing to hide.
+            declared_seconds = actual_seconds
+            log("      Song is already shorter than the target; left duration untouched.")
+        in_game_script = (
+            f"-- Spoof Method (metadata says {declared_seconds:.2f}s, full {actual_seconds:.2f}s song inside)\n"
+            f"-- Upload validation only sees the short declared duration.\n"
+            f"-- The full song plays at normal speed in game - no special setup needed:\n"
+            f"local sound = script.Parent\n"
+            f"sound.Volume = 1.0\n"
+            f"sound:Play()\n"
+        )
     else:  # METHOD_MULTISTREAM
         if target_seconds >= song_max:
             log(
@@ -387,4 +434,17 @@ def verify(path: str, log: Callable[[str], None] = print) -> dict:
             log("Verdict:             Coolin-crafted file (fake short duration).")
         else:
             log("Verdict:             Discord-ready OGG file (clean duration).")
+
+    # See through the declared duration by decoding every packet.
+    try:
+        exe = ffmpeg_util.find_ffmpeg()
+        real_seconds = ffmpeg_util.decode_duration(exe, path)
+        log(f"Full-decode length:  {ogg_util.format_seconds(real_seconds)}")
+        if report["declared_seconds"] is not None and real_seconds > report["declared_seconds"] * 1.5:
+            log(
+                "Verdict:             Coolin spoof file (metadata says short, "
+                f"really {ogg_util.format_seconds(real_seconds)} of audio inside)."
+            )
+    except Exception:
+        pass
     return report

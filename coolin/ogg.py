@@ -160,6 +160,11 @@ def detect_codec(data: bytes, pages: List[OggPage]) -> Tuple[str, int]:
 MAX_SECONDS = 419.0  # 6 minutes and 59 seconds (6 * 60 + 59)
 
 
+# ---------------------------------------------------------------------------
+
+OPUS_PRESKIP = 312  # samples @ 48 kHz that the Opus encoder pads at the start
+
+
 def inject_fake_duration(data: bytes, seconds: float) -> Tuple[bytes, Dict]:
     """Rewrite the last page's granule position so the declared duration is
     *seconds* long, while every audio packet stays untouched.
@@ -204,6 +209,72 @@ def inject_fake_duration(data: bytes, seconds: float) -> Tuple[bytes, Dict]:
         "declared_seconds": new_granule / rate,
         "original_last_granule": last.granule,
         "new_last_granule": new_granule,
+    }
+    return bytes(buf), info
+
+
+def spoof_duration(data: bytes, seconds: float) -> Tuple[bytes, Dict]:
+    """Rewrite EVERY page's granule position so the file *declares* a duration
+    of *seconds* while every audio packet stays untouched.
+
+    Unlike :func:`inject_fake_duration` (which only shrinks the last page and
+    leaves non-monotonic granules behind), this rescales the whole granule
+    timeline proportionally.  Every parser - including ones that compute the
+    duration from granule deltas with unsigned arithmetic - therefore sees a
+    short, clean, well-formed file, while a demuxer that decodes to EOF still
+    plays the complete song.
+
+    Returns (new_file_bytes, info_dict).
+    """
+    if seconds <= 0:
+        raise ValueError("Spoofed duration must be greater than zero")
+    if seconds > MAX_SECONDS:
+        raise ValueError(
+            f"Spoofed duration cannot exceed 6 minutes and 59 seconds ({MAX_SECONDS} seconds)"
+        )
+
+    pages = parse_pages(data)
+    codec, rate = detect_codec(data, pages)
+
+    last = pages[-1]
+    if last.granule <= 0:
+        raise ValueError("Last Ogg page carries no granule position; nothing to rewrite")
+
+    actual_seconds = last.granule / rate
+    if seconds >= actual_seconds:
+        raise ValueError(
+            f"Spoofed duration ({seconds:.2f}s) must be shorter than the real "
+            f"audio length ({actual_seconds:.2f}s)"
+        )
+
+    # Keep the declared duration strictly *under* the requested target so
+    # scanners comparing against hard limits (10s, 6:59, ...) never see the
+    # value rounded up.  Opus granules start after the encoder preskip.
+    preskip = OPUS_PRESKIP if codec == "opus" else 0
+    target_granule = max(1, int(round(rate * seconds)) - preskip)
+    factor = target_granule / last.granule
+
+    buf = bytearray(data)
+    new_granules: Dict[int, int] = {}
+    for page in pages:
+        if page.granule > 0:
+            new_g = max(1, int(round(page.granule * factor)))
+            struct.pack_into("<q", buf, page.offset + 6, new_g)
+            new_granules[page.offset] = new_g
+            struct.pack_into("<I", buf, page.offset + 22, 0)  # zero CRC field
+            crc = ogg_crc(bytes(buf[page.offset : page.offset + page.size]))
+            struct.pack_into("<I", buf, page.offset + 22, crc)
+
+    info = {
+        "codec": codec,
+        "granule_rate": rate,
+        "pages": len(pages),
+        "actual_seconds": actual_seconds,
+        "declared_seconds": target_granule / rate,
+        "original_last_granule": last.granule,
+        "new_last_granule": target_granule,
+        "scale_factor": factor,
+        "rewritten_granules": len(new_granules),
     }
     return bytes(buf), info
 
