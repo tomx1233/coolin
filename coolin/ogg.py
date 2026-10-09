@@ -157,6 +157,8 @@ def detect_codec(data: bytes, pages: List[OggPage]) -> Tuple[str, int]:
 # The trick itself
 # ---------------------------------------------------------------------------
 
+MAX_SECONDS = 419.0  # 6 minutes and 59 seconds (6 * 60 + 59)
+
 
 def inject_fake_duration(data: bytes, seconds: float) -> Tuple[bytes, Dict]:
     """Rewrite the last page's granule position so the declared duration is
@@ -166,6 +168,10 @@ def inject_fake_duration(data: bytes, seconds: float) -> Tuple[bytes, Dict]:
     """
     if seconds <= 0:
         raise ValueError("Fake duration must be greater than zero")
+    if seconds > MAX_SECONDS:
+        raise ValueError(
+            f"Fake duration cannot exceed 6 minutes and 59 seconds ({MAX_SECONDS} seconds)"
+        )
 
     pages = parse_pages(data)
     codec, rate = detect_codec(data, pages)
@@ -221,13 +227,19 @@ def describe(data: bytes) -> Dict:
             break
         prev = page.granule
 
+    declared = (last.granule / rate) if last.granule >= 0 else None
+    if not monotonic and real_max > (last.granule if last.granule >= 0 else 0):
+        full_audio = real_max / rate
+    else:
+        full_audio = declared
+
     return {
         "codec": codec,
         "granule_rate": rate,
         "pages": len(pages),
         "serial": pages[0].serial,
-        "declared_seconds": (last.granule / rate) if last.granule >= 0 else None,
-        "full_audio_seconds": real_max / rate if real_max else None,
+        "declared_seconds": declared,
+        "full_audio_seconds": full_audio,
         "last_page_is_eos": last.is_eos,
         "granules_monotonic": monotonic,
         "all_crcs_valid": all(page_crc_valid(data, p) for p in pages),

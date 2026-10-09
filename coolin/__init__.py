@@ -1,13 +1,9 @@
-"""Coolin - convert any audio into a "Discord 2-second" OGG file.
+"""Coolin - convert audio into Discord-compatible OGG files.
 
-The resulting OGG carries the *full* song, but its declared duration is
-rewritten (last-page Ogg granule position + CRC fix-up), so:
-
-* Discord's built-in audio player stops after ~2 seconds.
-* VLC plays the whole song.
-* FMOD and the default Windows media players refuse to play it.
+Outputs an OGG file that actually stops playing at the specified song length
+(default: 2 seconds, maximum: 6 minutes and 59 seconds / 419 seconds).
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = ["ffmpeg", "ogg", "pipeline", "__version__"]

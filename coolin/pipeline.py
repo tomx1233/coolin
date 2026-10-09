@@ -11,7 +11,44 @@ from . import ffmpeg as ffmpeg_util
 from . import ogg as ogg_util
 
 DEFAULT_FAKE_SECONDS = 2.0
+DEFAULT_DURATION_SECONDS = 2.0
+MAX_SECONDS = 419.0  # 6 minutes and 59 seconds (6 * 60 + 59)
+MAX_DURATION_STR = "6:59"
 OUTPUT_SUFFIX = "_discord"
+
+
+def parse_duration(val: str | float | int) -> float:
+    """Parse a duration string or number into seconds.
+
+    Supports float/int seconds ('419', 419.0) or MM:SS format ('6:59').
+    Validates that 0 < seconds <= MAX_SECONDS (419.0s / 6m 59s).
+    """
+    if isinstance(val, (int, float)):
+        seconds = float(val)
+    else:
+        val_str = str(val).strip()
+        if not val_str:
+            raise ValueError("Duration cannot be empty")
+        if ":" in val_str:
+            parts = val_str.split(":")
+            if len(parts) == 2:
+                mins, secs = parts
+                seconds = float(mins) * 60 + float(secs)
+            elif len(parts) == 3:
+                hrs, mins, secs = parts
+                seconds = float(hrs) * 3600 + float(mins) * 60 + float(secs)
+            else:
+                raise ValueError(f"Invalid duration format: {val!r}")
+        else:
+            seconds = float(val_str)
+
+    if seconds <= 0:
+        raise ValueError("Duration must be greater than zero")
+    if seconds > MAX_SECONDS:
+        raise ValueError(
+            f"Duration cannot exceed 6 minutes and 59 seconds ({MAX_SECONDS} seconds / {MAX_DURATION_STR})"
+        )
+    return seconds
 
 
 @dataclass
@@ -20,7 +57,7 @@ class CraftResult:
     encoder: str
     codec: str
     actual_seconds: float     # full audio that is really inside the file
-    declared_seconds: float   # what Discord's player will believe
+    declared_seconds: float   # what Discord's player will see
 
 
 def default_output_path(input_path: str) -> str:
@@ -34,9 +71,12 @@ def craft(
     fake_seconds: float = DEFAULT_FAKE_SECONDS,
     codec: str = "auto",
     log: Callable[[str], None] = print,
+    *,
+    duration_seconds: Optional[float] = None,
 ) -> CraftResult:
-    """Convert *input_path* into an OGG whose declared duration is
-    *fake_seconds*, while the whole song stays inside the file.
+    """Convert *input_path* into an OGG whose audio is stopped/trimmed at
+    the specified duration (up to 6 minutes and 59 seconds), so Discord's
+    audio player actually stops playing at the specified song length.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -47,51 +87,39 @@ def craft(
     if os.path.normcase(output_path) == os.path.normcase(input_path):
         raise ValueError("Output path must differ from the input path")
 
+    raw_duration = duration_seconds if duration_seconds is not None else fake_seconds
+    target_seconds = parse_duration(raw_duration)
+
     log(f"[1/4] Looking for ffmpeg...")
     exe = ffmpeg_util.find_ffmpeg()
     log(f"      using {exe}")
 
-    log(f"[2/4] Converting {os.path.basename(input_path)} to OGG...")
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        suffix=".full.ogg", dir=os.path.dirname(output_path) or "."
+    log(
+        f"[2/4] Converting {os.path.basename(input_path)} to OGG "
+        f"(stopping at {ogg_util.format_seconds(target_seconds)})..."
     )
-    os.close(tmp_fd)
-    try:
-        encoder = ffmpeg_util.convert_to_ogg(exe, input_path, tmp_path, codec, log)
-        with open(tmp_path, "rb") as handle:
-            full_data = handle.read()
-        full_pages = ogg_util.parse_pages(full_data)
-        full_codec, rate = ogg_util.detect_codec(full_data, full_pages)
-        actual_seconds = full_pages[-1].granule / rate
+    encoder = ffmpeg_util.convert_to_ogg(
+        exe, input_path, output_path, codec, duration=target_seconds, log=log
+    )
 
-        log(
-            f"[3/4] Rewriting last-page granule position: "
-            f"{actual_seconds:.2f}s of real audio, declared duration -> "
-            f"{fake_seconds:.2f}s"
-        )
-        patched, info = ogg_util.inject_fake_duration(full_data, fake_seconds)
-
-        with open(output_path, "wb") as handle:
-            handle.write(patched)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    log(f"[3/4] Verifying generated OGG container...")
+    with open(output_path, "rb") as handle:
+        out_data = handle.read()
+    pages = ogg_util.parse_pages(out_data)
+    out_codec, rate = ogg_util.detect_codec(out_data, pages)
+    actual_seconds = pages[-1].granule / rate
 
     log(f"[4/4] Wrote {output_path}")
     log(
-        f"      Discord/Chromium will stop after "
-        f"{ogg_util.format_seconds(info['declared_seconds'])}, "
-        f"VLC will play the full "
-        f"{ogg_util.format_seconds(info['actual_seconds'])}."
+        f"      Discord will stop playing after "
+        f"{ogg_util.format_seconds(actual_seconds)}."
     )
     return CraftResult(
         output_path=output_path,
         encoder=encoder,
-        codec=info["codec"],
-        actual_seconds=info["actual_seconds"],
-        declared_seconds=info["declared_seconds"],
+        codec=out_codec,
+        actual_seconds=actual_seconds,
+        declared_seconds=actual_seconds,
     )
 
 
@@ -109,8 +137,8 @@ def verify(path: str, log: Callable[[str], None] = print) -> dict:
     log(f"Granules monotonic:  {report['granules_monotonic']}")
     log(f"All page CRCs valid: {report['all_crcs_valid']}")
     if report["declared_seconds"] is not None and report["full_audio_seconds"]:
-        if report["full_audio_seconds"] > report["declared_seconds"]:
+        if not report["granules_monotonic"] and report["full_audio_seconds"] > report["declared_seconds"]:
             log("Verdict:             Coolin-crafted file (fake short duration).")
         else:
-            log("Verdict:             normal Ogg file.")
+            log("Verdict:             Discord-ready OGG file (clean duration).")
     return report

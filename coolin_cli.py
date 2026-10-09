@@ -20,10 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="coolin",
         description=(
-            "Convert audio files into OGG files whose declared duration is "
-            "rewritten (default: 2 seconds). Discord's audio player stops at "
-            "the declared duration, VLC plays the whole song, and FMOD / the "
-            "default Windows players refuse to play the file."
+            "Convert audio files into Discord-compatible OGG files that actually "
+            "stop playing at the specified duration (default: 2 seconds, "
+            "max: 6 minutes and 59 seconds)."
         ),
     )
     parser.add_argument("inputs", nargs="*", help="audio files to convert")
@@ -32,9 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="output .ogg path (only valid with a single input file)",
     )
     parser.add_argument(
-        "-d", "--seconds", type=float, default=pipeline.DEFAULT_FAKE_SECONDS,
-        help=f"duration Discord should see, in seconds "
-             f"(default: {pipeline.DEFAULT_FAKE_SECONDS})",
+        "-d", "--seconds", default=str(pipeline.DEFAULT_FAKE_SECONDS),
+        help=f"duration the song should play for in Discord in seconds or MM:SS "
+             f"(default: {pipeline.DEFAULT_FAKE_SECONDS}, max: {pipeline.MAX_DURATION_STR} / {pipeline.MAX_SECONDS}s)",
     )
     parser.add_argument(
         "--codec", choices=("auto", "opus", "vorbis"), default="auto",
@@ -66,8 +65,10 @@ def main(argv=None) -> int:
         parser.error("give at least one input file (or use --verify)")
     if args.output and len(args.inputs) > 1:
         parser.error("-o/--output can only be used with a single input file")
-    if args.seconds <= 0:
-        parser.error("--seconds must be greater than zero")
+    try:
+        seconds = pipeline.parse_duration(args.seconds)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     failures = 0
     for index, input_path in enumerate(args.inputs, 1):
@@ -77,7 +78,7 @@ def main(argv=None) -> int:
             pipeline.craft(
                 input_path,
                 output_path=args.output,
-                fake_seconds=args.seconds,
+                fake_seconds=seconds,
                 codec=args.codec,
             )
         except Exception as exc:

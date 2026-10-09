@@ -92,13 +92,13 @@ class CoolinApp(tk.Tk):
             variable=self.same_folder_var,
         ).grid(row=1, column=1, columnspan=2, sticky="w", padx=4)
 
-        ttk.Label(options_frame, text="Discord duration (seconds):").grid(
+        ttk.Label(options_frame, text="Discord duration (max 6:59):").grid(
             row=2, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
         controls.grid(row=2, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
         self.seconds_var = tk.StringVar(value=str(pipeline.DEFAULT_FAKE_SECONDS))
-        ttk.Spinbox(controls, from_=0.1, to=60.0, increment=0.5, width=7,
+        ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")
         ttk.Label(controls, text="   Codec:").pack(side="left", padx=(16, 4))
         self.codec_var = tk.StringVar(value="auto")
@@ -122,9 +122,8 @@ class CoolinApp(tk.Tk):
         self.log_text.pack(fill="both", expand=True, **pad)
         self.log(
             "Insert one or more audio files and press Convert.\n"
-            "The OGG keeps the whole song, but its declared duration is "
-            "rewritten so Discord stops early, VLC plays everything, and "
-            "FMOD / Windows media players refuse the file."
+            "Converts audio to Discord-compatible OGG files that actually stop "
+            "playing after the specified duration (up to 6 minutes and 59 seconds)."
         )
 
         # -- status bar -------------------------------------------------------------
@@ -192,12 +191,12 @@ class CoolinApp(tk.Tk):
             messagebox.showwarning("Coolin", "Insert at least one audio file first.")
             return
         try:
-            seconds = float(self.seconds_var.get())
-            if seconds <= 0:
-                raise ValueError
-        except ValueError:
+            seconds = pipeline.parse_duration(self.seconds_var.get())
+        except ValueError as exc:
             messagebox.showerror(
-                "Coolin", "The Discord duration must be a positive number of seconds."
+                "Coolin",
+                f"Invalid duration: {exc}\n"
+                f"Duration must be greater than zero and at most 6 minutes 59 seconds ({pipeline.MAX_SECONDS}s)."
             )
             return
 

@@ -1,44 +1,26 @@
 # Coolin 🎧
 
-**Audio file inserter → OGG converter with a rewritten declared duration.**
+**Audio file inserter → OGG converter with accurate playback duration for Discord.**
 
-Coolin takes any audio file you insert (MP3, WAV, FLAC, M4A, …), converts it
-to OGG, and then performs a tiny piece of Ogg container surgery: it rewrites
-the file's **declared duration** (default: **2 seconds**) while leaving every
-single audio packet inside the file untouched.
+Coolin takes any audio file you insert (MP3, WAV, FLAC, M4A, …) and converts it
+to an OGG file that actually stops playing at the specified duration (default: **2 seconds**,
+maximum: **6 minutes and 59 seconds** / **419 seconds**) when played in Discord.
 
-The result behaves differently depending on who plays it:
-
-| Player                        | What happens                                                        |
-| ----------------------------- | ------------------------------------------------------------------- |
-| **Discord's audio player**    | Plays only the first ~2 seconds, then stops.                        |
-| **VLC**                       | Plays the whole song normally.                                      |
-| **FMOD**                      | Refuses to play the file (broken/non-monotonic granule positions + no native OGG/Opus decoding). |
-| **Windows default players**   | Refuse the file (no native OGG/Opus codec in WMP/Groove/Media Player). |
+The result stops cleanly at the specified song length instead of continuing to play.
 
 It is a Python application with both a **GUI** and a **CLI**, and it runs on
 Windows out of the box.
 
-## How the trick works
+## How it works
 
-An Ogg file is a chain of *pages*. The length of the audio is derived from
-the **granule position** stored in the **last page** of the stream. Coolin:
-
-1. transcodes your input to a clean OGG (Opus preferred — that is what
-   Discord is happiest with, and it is undecodable by FMOD / the default
-   Windows players),
-2. overwrites the last page's granule position with
-   `fake_seconds × sample_rate` (Opus granules are always 48 kHz),
-3. recomputes that page's Ogg CRC-32 so the container stays "valid".
-
-The timeline stored in all the *other* pages still runs to the end of the
-song, so:
-
-- players that trust the declared duration and stop at it (Discord runs on
-  Chromium/Electron, which does exactly that) cut off after ~2 seconds,
-- players that simply demux packets until the real end of file (VLC) play
-  the whole song,
-- strict demuxers (FMOD) choke on the now non-monotonic granule positions.
+1. Coolin transcodes your input audio to a clean OGG stream (Opus preferred —
+   that is what Discord natively supports).
+2. The audio stream is trimmed to the specified duration (up to the maximum of
+   6 minutes and 59 seconds), ensuring the stream terminates with an EOS
+   (end-of-stream) page at that exact point so Discord's audio player actually
+   stops playback instead of continuing.
+3. Durations can be entered as seconds (e.g. `2.0`, `419`) or `MM:SS` format
+   (e.g. `6:59`).
 
 ## Requirements
 
@@ -60,8 +42,8 @@ Double-click **`run_gui.bat`** (or run `python coolin_gui.py`):
 
 1. **Insert audio file(s)** — add one or more songs (any format ffmpeg understands).
 2. Pick the output folder (or keep *"write next to each input file"*).
-3. Set the **Discord duration** in seconds (default `2.0`) and the codec
-   (`auto` keeps Opus, the recommended choice).
+3. Set the **Discord duration** in seconds (default `2.0`, max `6:59` / `419.0s`)
+   and the codec (`auto` keeps Opus, the recommended choice).
 4. Press **Convert to Discord OGG**.
 
 Outputs are named `<original name>_discord.ogg`.
@@ -69,34 +51,20 @@ Outputs are named `<original name>_discord.ogg`.
 ## Using the CLI
 
 ```bat
-:: convert with defaults (2.0s declared duration, Opus)
+:: convert with defaults (2.0s duration, Opus)
 python coolin_cli.py song.mp3
 
-:: choose output path and duration
-python coolin_cli.py song.mp3 -o output.ogg -d 2
+:: choose output path and duration (supports seconds or MM:SS up to 6:59)
+python coolin_cli.py song.mp3 -o output.ogg -d 6:59
 
 :: batch + force Vorbis codec
 python coolin_cli.py a.mp3 b.flac -d 3 --codec vorbis
 
-:: inspect an OGG file (is it a Coolin-crafted one?)
+:: inspect an OGG file
 python coolin_cli.py --verify song_discord.ogg
 ```
 
 On Windows you can use `run_cli.bat` instead of `python coolin_cli.py`.
-
-Example `--verify` output:
-
-```
-File:                song_discord.ogg
-Codec:               opus @ 48000 Hz granule base
-Ogg pages:           28 (serial 3990938213)
-Declared duration:   0:02.00
-Audio really inside: 0:25.00
-Last page EOS flag:  True
-Granules monotonic:  False
-All page CRCs valid: True
-Verdict:             Coolin-crafted file (fake short duration).
-```
 
 ## Building a standalone Coolin.exe
 
@@ -113,18 +81,14 @@ in `dist\Coolin.exe`.
 coolin_gui.py        tkinter GUI application (Windows-friendly)
 coolin_cli.py        command line interface
 coolin/
-  pipeline.py        high-level convert + duration-rewrite workflow
+  pipeline.py        high-level convert + duration trimming workflow
   ffmpeg.py          ffmpeg discovery (PATH or imageio-ffmpeg) + conversion
-  ogg.py             Ogg page parser, Ogg CRC-32, granule-position surgery
-tests/test_ogg.py    unit tests (CRC, patching, full-decode integrity)
+  ogg.py             Ogg page parser, Ogg CRC-32, container utilities
+tests/test_ogg.py    unit tests (CRC, duration limits, trimming integrity)
 ```
 
 ## Notes & disclaimer
 
-- The fake duration must be **shorter** than the real song; Coolin rejects
-  anything else.
-- Opus is the default on purpose: OGG/Opus is what Discord expects, and it
-  maximizes the "won't play anywhere strict" behavior (FMOD, WMP).
+- The maximum duration for any song is **6 minutes and 59 seconds** (419 seconds).
+- Opus is the default on purpose: OGG/Opus is what Discord expects.
 - Run the tests with `python -m unittest discover -s tests -v`.
-- This is a novelty tool for your own files. Don't use it to confuse other
-  people's players in ways they didn't sign up for.

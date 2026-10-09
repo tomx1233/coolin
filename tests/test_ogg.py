@@ -15,6 +15,8 @@ import wave
 
 from coolin import ffmpeg as ffmpeg_util
 from coolin import ogg as ogg_util
+from coolin import pipeline
+import coolin_cli
 
 TONE_SECONDS = 6.0
 FAKE_SECONDS = 2.0
@@ -152,6 +154,67 @@ class OggCraftingTest(unittest.TestCase):
         self.assertFalse(report["granules_monotonic"])
         self.assertAlmostEqual(report["declared_seconds"], FAKE_SECONDS, places=2)
         self.assertGreater(report["full_audio_seconds"], TONE_SECONDS * 0.9)
+
+    def test_parse_duration_limits_and_formats(self):
+        """Duration parsing handles seconds, MM:SS, and enforces 6:59 (419s) max limit."""
+        self.assertEqual(pipeline.parse_duration(419), 419.0)
+        self.assertEqual(pipeline.parse_duration("419"), 419.0)
+        self.assertEqual(pipeline.parse_duration(419.0), 419.0)
+        self.assertEqual(pipeline.parse_duration("6:59"), 419.0)
+        self.assertEqual(pipeline.parse_duration("0:02"), 2.0)
+        self.assertEqual(pipeline.parse_duration("1:30"), 90.0)
+        self.assertEqual(pipeline.parse_duration(2.5), 2.5)
+
+        # Rejections: exceeding 6 min 59 seconds (419s), <= 0, or malformed
+        for invalid in (420, "420", 419.1, "7:00", "6:60", 0, -1, "", "abc", "1:2:3:4"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    pipeline.parse_duration(invalid)
+
+    def test_craft_stops_at_specified_duration(self):
+        """Crafted output must actually stop at the specified duration (e.g. 2.0s),
+        not continuing playback of the 6.0s input."""
+        craft_out = os.path.join(self.tmpdir.name, "tone_crafted_2s.ogg")
+        result = pipeline.craft(
+            self.wav_path,
+            output_path=craft_out,
+            fake_seconds=2.0,
+            log=lambda _: None,
+        )
+        self.assertTrue(os.path.isfile(craft_out))
+        self.assertAlmostEqual(result.actual_seconds, 2.0, delta=0.1)
+        self.assertAlmostEqual(result.declared_seconds, 2.0, delta=0.1)
+
+        # Probe duration must match ~2.0s
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, craft_out)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, 2.0, delta=0.1)
+
+        # Full decode must only produce ~2.0s worth of audio bytes, not 6.0s!
+        pcm_bytes = ffmpeg_util.decoded_pcm_bytes(self.ffmpeg, craft_out)
+        decoded_seconds = pcm_bytes / (48000 * 2 * 2)
+        self.assertAlmostEqual(decoded_seconds, 2.0, delta=0.1)
+        self.assertLess(decoded_seconds, 3.0)
+
+    def test_craft_rejects_exceeding_max_duration(self):
+        """Craft must reject durations longer than 6 min 59 seconds (419s)."""
+        craft_out = os.path.join(self.tmpdir.name, "should_fail.ogg")
+        with self.assertRaises(ValueError):
+            pipeline.craft(self.wav_path, output_path=craft_out, fake_seconds=420)
+        with self.assertRaises(ValueError):
+            pipeline.craft(self.wav_path, output_path=craft_out, fake_seconds="7:00")
+
+    def test_cli_handles_duration_formats_and_limits(self):
+        """CLI accepts MM:SS format up to 6:59 and rejects > 6:59."""
+        parser = coolin_cli.build_parser()
+        args = parser.parse_args(["song.mp3", "-d", "6:59"])
+        self.assertEqual(pipeline.parse_duration(args.seconds), 419.0)
+
+        # Over max limit:
+        with self.assertRaises(SystemExit):
+            coolin_cli.main(["song.mp3", "-d", "7:00"])
+        with self.assertRaises(SystemExit):
+            coolin_cli.main(["song.mp3", "-d", "420"])
 
 
 if __name__ == "__main__":
