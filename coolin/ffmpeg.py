@@ -141,16 +141,13 @@ def convert_segment(
     start_time: Optional[float] = None,
     duration: Optional[float] = None,
     bitrate: Optional[int] = None,
+    audio_filter: Optional[str] = None,
     log=print,
 ) -> str:
     """Encode ONE segment of *input_path* as an upload-safe chunk file.
 
-    fmt: 'wav' (lossless PCM), 'flac' (lossless) or 'ogg' (Opus at *bitrate*).
+    fmt: 'wav' (lossless PCM), 'flac' (lossless), 'mp3' or 'ogg' (Opus).
     The extension of *output_path* must match the format.  Returns the codec.
-
-    Used by the chunked method: since Roblox transcodes every upload itself,
-    feeding it lossless chunks means Roblox's own transcode is the ONLY lossy
-    step - i.e. the closest possible result to the original song.
     """
     if fmt == "wav":
         codec_args = ["-c:a", "pcm_s16le", "-ar", "48000"]
@@ -175,12 +172,111 @@ def convert_segment(
         raise ValueError(f"Unsupported chunk format: {fmt!r}")
     seek_args = ["-ss", str(start_time)] if start_time is not None else []
     duration_args = ["-t", str(duration)] if duration is not None else []
+    filter_args = ["-af", audio_filter] if audio_filter else []
     cmd = (
         [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
         + seek_args
         + ["-i", input_path]
         + duration_args
         + ["-map", "0:a:0", "-vn"]
+        + filter_args
+        + codec_args
+        + [output_path]
+    )
+    log(f"ffmpeg: {' '.join(_quote(arg) for arg in cmd)}")
+    result = _run(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg failed to convert the input file:\n" + result.stderr.strip()
+        )
+    return codec
+
+
+def probe_mean_volume(exe: str, input_args: Sequence[str], audio_filter: str) -> Optional[float]:
+    """Mean (RMS) volume in dB of an input (file or lavfi source) after
+    applying *audio_filter*.  Returns None if volumedetect reports nothing."""
+    cmd = (
+        [exe, "-hide_banner", "-nostdin"]
+        + list(input_args)
+        + ["-af", audio_filter + ",volumedetect", "-f", "null", "-"]
+    )
+    result = _run(cmd)
+    for line in (result.stderr or "").splitlines():
+        if "mean_volume:" in line:
+            try:
+                return float(line.split("mean_volume:")[1].split("dB")[0].strip())
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def convert_mono_gate(
+    exe: str,
+    input_path: str,
+    output_path: str,
+    fmt: str = "flac",
+    duration: Optional[float] = None,
+    mask_depth_db: float = 18.0,
+    noise_amplitude: float = 0.5,
+    seed: int = 42,
+    log=print,
+) -> str:
+    """Encode *input_path* so it is masked in STEREO but clean in MONO.
+
+    Construction:  L = music + noise,  R = music - noise
+      - Stereo playback (Roblox web preview / moderation): each ear hears the
+        loud noise with the music buried *mask_depth_db* beneath it
+        (psychoacoustic masking) -> sounds like plain noise.
+      - Mono downmix (Roblox 3D sounds parented to a Part/Attachment):
+        the anti-correlated noise cancels in L+R -> only the music remains.
+
+    Returns the codec used.
+    """
+    # Measure the music's mono RMS so the mask depth is input-independent.
+    music_af = "aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1"
+    music_rms = probe_mean_volume(exe, ["-i", input_path], music_af)
+    if music_rms is None:
+        music_rms = -20.0
+    # Measure the pink-noise masker's RMS at the chosen amplitude.
+    noise_src = (
+        f"anoisesrc=color=pink:sample_rate=48000:amplitude={noise_amplitude}"
+        f":seed={seed}:duration=2"
+    )
+    noise_rms = probe_mean_volume(exe, ["-f", "lavfi", "-i", noise_src],
+                                  "aformat=channel_layouts=mono")
+    if noise_rms is None:
+        noise_rms = -12.0
+    music_gain = (noise_rms - mask_depth_db) - music_rms
+
+    noise_dur = (duration + 1.0) if duration is not None else 720.0
+    graph = (
+        "[0:a]aresample=48000,aformat=channel_layouts=stereo,"
+        "pan=mono|c0=0.5*c0+0.5*c1"
+        f",volume={music_gain:.2f}dB[m0];"
+        "[m0]asplit=2[m1][m2];"
+        f"anoisesrc=color=pink:sample_rate=48000:amplitude={noise_amplitude}"
+        f":seed={seed}:duration={noise_dur},"
+        "aformat=sample_fmts=fltp:channel_layouts=mono[n0];"
+        "[n0]asplit=2[na][nb];"
+        "[nb]pan=mono|c0=-1*c0[ninv];"
+        "[m1][na]amix=inputs=2:duration=first:normalize=0[L];"
+        "[m2][ninv]amix=inputs=2:duration=first:normalize=0[R];"
+        "[L][R]amerge=inputs=2,alimiter=limit=0.98[out]"
+    )
+    if fmt == "flac":
+        codec_args = ["-c:a", "flac", "-compression_level", "8", "-ar", "48000"]
+        codec = "flac"
+    elif fmt == "mp3":
+        codec_args = ["-c:a", "libmp3lame", "-b:a", "320k", "-ar", "48000"]
+        codec = "libmp3lame"
+    else:
+        raise ValueError(f"mono-gate supports flac or mp3, got {fmt!r}")
+    duration_args = ["-t", str(duration)] if duration is not None else []
+    cmd = (
+        [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+        + ["-i", input_path]
+        + ["-filter_complex", graph, "-map", "[out]"]
+        + duration_args
         + codec_args
         + [output_path]
     )

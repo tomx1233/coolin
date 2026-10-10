@@ -320,6 +320,56 @@ class OggCraftingTest(unittest.TestCase):
         self.assertIsNotNone(dur)
         self.assertAlmostEqual(dur, 2.0, delta=0.5)
 
+    def test_monogate_method_masked_in_stereo_clean_in_mono(self):
+        """MonoGate: L = music + noise, R = music - noise.
+        Stereo (what the Roblox web preview plays) must be noise-dominant;
+        the mono downmix (what in-game 3D sounds play) must be the music."""
+        out_path = os.path.join(self.tmpdir.name, "gate_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="monogate",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             mask_depth=18.0, log=lambda _: None)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+
+        # Per-channel (stereo) level: dominated by the loud noise.
+        left = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], "pan=mono|c0=c0")
+        right = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], "pan=mono|c0=c1")
+        self.assertIsNotNone(left)
+        self.assertIsNotNone(right)
+        # L and R carry (anti-correlated) noise at a similar loud level.
+        self.assertGreater(left, -35.0)
+        self.assertLess(abs(left - right), 3.0)
+
+        # Mono downmix: the noise cancels; only the music remains.
+        mono = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path],
+            "aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1")
+        self.assertIsNotNone(mono)
+        # Audible music (not silence)...
+        self.assertGreater(mono, -60.0)
+        # ...and roughly mask_depth (18 dB) below the stereo noise level.
+        self.assertGreater(left - mono, 10.0)
+        self.assertLess(left - mono, 26.0)
+
+        # The proof file for the user exists and is the mono downmix.
+        stem = os.path.splitext(res.output_path)[0]
+        test_path = stem + "_test_mono.wav"
+        self.assertTrue(os.path.isfile(test_path))
+        test_mono = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", test_path], "aformat=channel_layouts=mono")
+        self.assertIsNotNone(test_mono)
+        self.assertAlmostEqual(test_mono, mono, delta=1.5)
+
+        # Duration and limits respected; script parents the Sound to a Part (3D).
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+        self.assertIn("Instance.new(\"Sound\")", res.in_game_script)
+        self.assertIn("sound.Parent = part", res.in_game_script)
+
     def test_single_method_one_clean_asset(self):
         """Single method: ONE clean file at original pitch & speed - lossless
         FLAC when it fits, under the 7:00 limit and the 20 MB size limit."""

@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("single", "chunked", "invert", "speed", "invert_speed", "multistream"),
+        choices=("single", "chunked", "monogate", "invert", "speed", "invert_speed", "multistream"),
         default=pipeline.METHOD_SINGLE,
         help=(
             "conversion method: 'single' (ONE clean asset at original pitch & speed - lossless "
@@ -54,10 +54,19 @@ def build_parser() -> argparse.ArgumentParser:
             "into lossless upload-safe chunk files and generates an in-game Script that plays "
             "them as one continuous song at original quality), "
             "'invert' (phase inversion: cancels to silence in mono/preview, plays in-game), "
+            "'monogate' (masked in STEREO - the web preview/moderation hears only pink noise - "
+            "but clean in-game because Roblox 3D sounds play as MONO and the anti-correlated "
+            "noise cancels in the L+R sum), "
             "'speed' (playback speed invert: short physical file, plays full song in-game via "
             "Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' (chained OGG for the "
             "Discord preview trick). Default: single"
         ),
+    )
+    parser.add_argument(
+        "--mask-depth", type=float, default=18.0, metavar="DB",
+        help="mask depth in dB for the 'monogate' method: how far the music sits under "
+             "the noise in the stereo preview (default 18). Higher = stronger masking "
+             "but quieter in-game playback.",
     )
     parser.add_argument(
         "-f", "--chunk-format", choices=pipeline.CHUNK_FORMATS, default="auto",
@@ -106,7 +115,7 @@ def main(argv=None) -> int:
         if args.seconds is None:
             if args.method == pipeline.METHOD_CHUNKED:
                 raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
-            elif args.method == pipeline.METHOD_SINGLE:
+            elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE):
                 raw_seconds = pipeline.SINGLE_MAX_SECONDS
             else:
                 raw_seconds = pipeline.DEFAULT_FAKE_SECONDS
@@ -129,6 +138,7 @@ def main(argv=None) -> int:
                 method=args.method,
                 speed_factor=args.speed_factor,
                 chunk_format=args.chunk_format,
+                mask_depth=args.mask_depth,
                 asset_name=args.asset_name,
             )
         except Exception as exc:

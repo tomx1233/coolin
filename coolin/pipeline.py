@@ -25,6 +25,7 @@ METHOD_INVERT_SPEED = "invert_speed"
 METHOD_MULTISTREAM = "multistream"
 METHOD_CHUNKED = "chunked"
 METHOD_SINGLE = "single"
+METHOD_MONOGATE = "monogate"
 SUPPORTED_METHODS = (
     METHOD_INVERT,
     METHOD_SPEED,
@@ -32,6 +33,7 @@ SUPPORTED_METHODS = (
     METHOD_MULTISTREAM,
     METHOD_CHUNKED,
     METHOD_SINGLE,
+    METHOD_MONOGATE,
 )
 
 # Default per-chunk length for the chunked method.  Roblox's import limit is
@@ -166,6 +168,7 @@ def craft(
     method: str = METHOD_INVERT,
     speed_factor: Optional[float] = None,
     chunk_format: str = "auto",
+    mask_depth: float = 18.0,
     log: Callable[[str], None] = print,
     *,
     duration_seconds: Optional[float] = None,
@@ -200,6 +203,14 @@ def craft(
       reports).  Songs longer than the cap are trimmed to it (a single Roblox
       asset physically cannot hold more - Roblox re-encodes and measures the
       decoded duration; use 'chunked' to keep every second).
+    - 'monogate': Masked in STEREO, clean in MONO.  The song is buried under
+      loud anti-correlated pink noise (L = music + noise, R = music - noise):
+      the stereo web preview / moderation review hears only noise (the music
+      sits *mask_depth* dB beneath it), while Roblox's 3D sounds (parented to
+      a Part/Attachment, which play as MONO) sum L+R, cancelling the noise and
+      leaving only the music.  mask_depth (default 18 dB) trades masking
+      strength against in-game loudness.  FLAC when it fits 20 MB, else
+      320 kbps MP3; same 6:58 cap as 'single'.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -595,6 +606,104 @@ def craft(
                 f"{ogg_util.format_seconds(full_dur)} song fits on one asset "
                 f"(Roblox hard limit).\n"
             )
+    elif method == METHOD_MONOGATE:
+        # Masked in STEREO (web preview / moderation hears noise), clean in
+        # MONO (Roblox 3D sounds parented to a Part/Attachment play mono and
+        # sum L+R, which cancels the anti-correlated noise).
+        #   L = music + noise,  R = music - noise
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)
+        encode_dur = full_dur
+        if full_dur > cap:
+            log(
+                f"[3/4] MonoGate Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"trimming to {ogg_util.format_seconds(cap)} (single-asset platform limit; "
+                f"use -m chunked to keep the whole song)."
+            )
+            encode_dur = cap
+        else:
+            log(
+                f"[3/4] MonoGate Method: burying the full {ogg_util.format_seconds(full_dur)} "
+                f"song {mask_depth:.0f} dB under anti-correlated pink noise "
+                f"(stereo preview = noise only; in-game 3D mono playback = clean music)..."
+            )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+
+        encoder = ""
+        chosen_path = None
+        last_error: Exception | None = None
+        for fmt in SINGLE_FORMATS:
+            path = os.path.join(out_dir, f"{out_base}.{fmt}")
+            if os.path.normcase(path) == os.path.normcase(input_path):
+                path = os.path.join(out_dir, f"{out_base}_gate.{fmt}")
+            try:
+                encoder = ffmpeg_util.convert_mono_gate(
+                    exe, input_path, path, fmt=fmt, duration=encode_dur,
+                    mask_depth_db=mask_depth, log=log,
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+            if os.path.getsize(path) <= MAX_UPLOAD_BYTES:
+                chosen_path = path
+                break
+            try:
+                os.remove(path)  # too big; next rung
+            except OSError:
+                pass
+        if chosen_path is None:
+            raise RuntimeError(
+                f"Could not encode the song under the 20 MB upload limit: {last_error}"
+            )
+
+        # A local proof file: exactly what the in-game MONO playback will hear.
+        test_path = os.path.join(out_dir, f"{out_base}_test_mono.wav")
+        try:
+            ffmpeg_util.convert_segment(
+                exe, chosen_path, test_path, fmt="wav",
+                duration=min(10.0, encode_dur),
+                audio_filter="aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1",
+                log=lambda _: None,
+            )
+        except RuntimeError:
+            test_path = ""
+
+        output_path = chosen_path
+        out_codec = "flac" if chosen_path.endswith(".flac") else "mp3"
+        declared_seconds = ffmpeg_util.probe_duration(exe, chosen_path) or encode_dur
+        actual_seconds = declared_seconds
+        size_mb = os.path.getsize(chosen_path) / 1_000_000
+        log(
+            f"      Wrote {chosen_path} [{out_codec.upper()} | "
+            f"{ogg_util.format_seconds(declared_seconds)} | {size_mb:.2f} MB]"
+        )
+        if test_path:
+            log(
+                f"      Proof file: {test_path}  <- play this: it is what your game "
+                f"hears (clean music).  Play {os.path.basename(chosen_path)} normally "
+                f"to hear what the Roblox preview hears (noise only)."
+            )
+        log(
+            "      IMPORTANT: in game, parent the Sound to a Part or Attachment "
+            "(3D sound) - that is what makes Roblox play it as MONO and unmask "
+            "the song.  A 2D Sound (SoundService/workspace) plays stereo = noise."
+        )
+        in_game_script = (
+            f"-- MonoGate Method ({ogg_util.format_seconds(declared_seconds)}; stereo preview "
+            f"hears noise, 3D mono playback hears the music)\n"
+            f"-- Keep the Sound parented to a Part or Attachment (3D) - REQUIRED.\n"
+            f"local part = script.Parent\n"
+            f'local sound = Instance.new("Sound")\n'
+            f'sound.SoundId = "rbxassetid://0" -- your uploaded asset ID\n'
+            f"sound.Volume = 10 -- compensates the {mask_depth:.0f} dB mask depth (adjust to taste)\n"
+            f"sound.Parent = part\n"
+            f"sound:Play()\n"
+        )
     else:  # METHOD_MULTISTREAM
         if target_seconds >= song_max:
             log(

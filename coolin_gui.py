@@ -107,6 +107,7 @@ class CoolinApp(tk.Tk):
                      values=(
                          pipeline.METHOD_SINGLE,
                          pipeline.METHOD_CHUNKED,
+                         pipeline.METHOD_MONOGATE,
                          pipeline.METHOD_INVERT,
                          pipeline.METHOD_SPEED,
                          pipeline.METHOD_INVERT_SPEED,
@@ -124,7 +125,11 @@ class CoolinApp(tk.Tk):
         self._default_seconds_for_method(self.method_var.get())
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")
-        ttk.Label(controls, text="   Codec:").pack(side="left", padx=(16, 4))
+        ttk.Label(controls, text="   Mask dB:").pack(side="left", padx=(16, 4))
+        self.mask_depth_var = tk.StringVar(value="18")
+        ttk.Spinbox(controls, from_=6, to=30, increment=1, width=4,
+                    textvariable=self.mask_depth_var).pack(side="left")
+        ttk.Label(controls, text="   Codec:").pack(side="left", padx=(8, 4))
         self.codec_var = tk.StringVar(value="auto")
         ttk.Combobox(controls, textvariable=self.codec_var, width=8,
                      values=("auto", "opus", "vorbis"),
@@ -163,7 +168,7 @@ class CoolinApp(tk.Tk):
     def _default_seconds_for_method(self, method: str) -> None:
         if method == pipeline.METHOD_CHUNKED:
             default = pipeline.DEFAULT_CHUNK_SECONDS
-        elif method == pipeline.METHOD_SINGLE:
+        elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE):
             default = pipeline.SINGLE_MAX_SECONDS
         else:
             default = pipeline.DEFAULT_FAKE_SECONDS
@@ -269,13 +274,18 @@ class CoolinApp(tk.Tk):
             target=self._worker,
             args=(files, seconds, self.codec_var.get(),
                   self.same_folder_var.get(), self.output_dir_var.get().strip(),
-                  raw_asset_name, self.method_var.get()),
+                  raw_asset_name, self.method_var.get(),
+                  self.mask_depth_var.get()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth) -> None:
+        try:
+            mask_depth = float(mask_depth)
+        except (TypeError, ValueError):
+            mask_depth = 18.0
         succeeded = 0
         for index, input_path in enumerate(files, 1):
             self.log_queue.put(
@@ -299,6 +309,7 @@ class CoolinApp(tk.Tk):
                     fake_seconds=seconds,
                     codec=codec,
                     method=method,
+                    mask_depth=mask_depth,
                     asset_name=single_name,
                     log=self.log_queue.put,
                 )
