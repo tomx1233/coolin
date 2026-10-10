@@ -32,7 +32,7 @@ _PROGRESS_TICK = "__coolin_tick__"
 class CoolinApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"Coolin {__version__} - Discord 2-Second OGG Converter")
+        self.title(f"Coolin {__version__} - Roblox & Discord Audio Converter")
         self.geometry("720x540")
         self.minsize(600, 440)
 
@@ -92,15 +92,44 @@ class CoolinApp(tk.Tk):
             variable=self.same_folder_var,
         ).grid(row=1, column=1, columnspan=2, sticky="w", padx=4)
 
-        ttk.Label(options_frame, text="Discord duration (seconds):").grid(
-            row=2, column=0, sticky="w", padx=8, pady=(4, 8))
+        ttk.Label(options_frame, text="Asset name (optional):").grid(
+            row=2, column=0, sticky="w", padx=8, pady=(4, 4))
+        self.asset_name_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=self.asset_name_var).grid(
+            row=2, column=1, sticky="ew", padx=4, pady=(4, 4))
+        ttk.Label(options_frame, text="max 50 chars (Roblox/Discord limit)").grid(
+            row=2, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+
+        ttk.Label(options_frame, text="Method:").grid(
+            row=3, column=0, sticky="w", padx=8, pady=(4, 4))
+        self.method_var = tk.StringVar(value=pipeline.METHOD_SINGLE)
+        ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
+                     values=(
+                         pipeline.METHOD_SINGLE,
+                         pipeline.METHOD_CHUNKED,
+                         pipeline.METHOD_MONOGATE,
+                         pipeline.METHOD_INVERT,
+                         pipeline.METHOD_SPEED,
+                         pipeline.METHOD_INVERT_SPEED,
+                         pipeline.METHOD_MULTISTREAM,
+                     ),
+                     state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
+        ttk.Label(options_frame, text="single = ONE asset, original pitch & speed (best)").grid(
+            row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+
+        ttk.Label(options_frame, text="Per-chunk / Discord duration (max 6:59):").grid(
+            row=4, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
-        controls.grid(row=2, column=1, columnspan=2, sticky="w",
+        controls.grid(row=4, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
-        self.seconds_var = tk.StringVar(value=str(pipeline.DEFAULT_FAKE_SECONDS))
-        ttk.Spinbox(controls, from_=0.1, to=60.0, increment=0.5, width=7,
+        self._default_seconds_for_method(self.method_var.get())
+        ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")
-        ttk.Label(controls, text="   Codec:").pack(side="left", padx=(16, 4))
+        ttk.Label(controls, text="   Mask dB:").pack(side="left", padx=(16, 4))
+        self.mask_depth_var = tk.StringVar(value="18")
+        ttk.Spinbox(controls, from_=6, to=30, increment=1, width=4,
+                    textvariable=self.mask_depth_var).pack(side="left")
+        ttk.Label(controls, text="   Codec:").pack(side="left", padx=(8, 4))
         self.codec_var = tk.StringVar(value="auto")
         ttk.Combobox(controls, textvariable=self.codec_var, width=8,
                      values=("auto", "opus", "vorbis"),
@@ -121,16 +150,44 @@ class CoolinApp(tk.Tk):
                                      font=("Consolas", 9))
         self.log_text.pack(fill="both", expand=True, **pad)
         self.log(
-            "Insert one or more audio files and press Convert.\n"
-            "The OGG keeps the whole song, but its declared duration is "
-            "rewritten so Discord stops early, VLC plays everything, and "
-            "FMOD / Windows media players refuse the file."
+            "Insert one or more audio files, pick a Method, and press Convert.\n"
+            "single (best): ONE asset, original pitch & speed, lossless FLAC or 320k MP3\n"
+            "chunked: full songs of ANY length as lossless upload-safe chunks + playlist script\n"
+            "invert: silent in mono previews  |  speed: short file, restored in game  |  multistream: Discord stops early, VLC plays all"
         )
 
         # -- status bar -------------------------------------------------------------
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(root, textvariable=self.status_var, anchor="w",
                   relief="sunken").pack(fill="x", side="bottom")
+
+        # Switching to the chunked method: default the duration to the 10s
+        # per-chunk upload length (instead of the 2s Discord preview).
+        self.method_var.trace_add("write", self._on_method_changed)
+
+    def _default_seconds_for_method(self, method: str) -> None:
+        if method == pipeline.METHOD_CHUNKED:
+            default = pipeline.DEFAULT_CHUNK_SECONDS
+        elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE):
+            default = pipeline.SINGLE_MAX_SECONDS
+        else:
+            default = pipeline.DEFAULT_FAKE_SECONDS
+        self.seconds_var.set(str(default))
+
+    def _on_method_changed(self, *_args) -> None:
+        method = self.method_var.get()
+        try:
+            current = float(self.seconds_var.get())
+        except ValueError:
+            current = None
+        known_defaults = {
+            pipeline.DEFAULT_FAKE_SECONDS,
+            pipeline.DEFAULT_CHUNK_SECONDS,
+            pipeline.SINGLE_MAX_SECONDS,
+        }
+        # Only auto-switch the duration if the user hasn't typed a custom value.
+        if current is None or current in known_defaults:
+            self._default_seconds_for_method(method)
 
     # ------------------------------------------------------------- helpers
     def log(self, message: str) -> None:
@@ -192,12 +249,21 @@ class CoolinApp(tk.Tk):
             messagebox.showwarning("Coolin", "Insert at least one audio file first.")
             return
         try:
-            seconds = float(self.seconds_var.get())
-            if seconds <= 0:
-                raise ValueError
-        except ValueError:
+            seconds = pipeline.parse_duration(self.seconds_var.get())
+        except ValueError as exc:
             messagebox.showerror(
-                "Coolin", "The Discord duration must be a positive number of seconds."
+                "Coolin",
+                f"Invalid duration: {exc}\n"
+                f"Duration must be greater than zero and at most 6 minutes 59 seconds ({pipeline.MAX_SECONDS}s)."
+            )
+            return
+
+        raw_asset_name = self.asset_name_var.get().strip()
+        if raw_asset_name and len(raw_asset_name) > pipeline.MAX_ASSET_NAME_LENGTH:
+            messagebox.showerror(
+                "Coolin",
+                f"Asset name length is invalid ({len(raw_asset_name)} characters).\n"
+                f"Asset name must not exceed {pipeline.MAX_ASSET_NAME_LENGTH} characters."
             )
             return
 
@@ -207,23 +273,34 @@ class CoolinApp(tk.Tk):
         self.worker = threading.Thread(
             target=self._worker,
             args=(files, seconds, self.codec_var.get(),
-                  self.same_folder_var.get(), self.output_dir_var.get().strip()),
+                  self.same_folder_var.get(), self.output_dir_var.get().strip(),
+                  raw_asset_name, self.method_var.get(),
+                  self.mask_depth_var.get()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth) -> None:
+        try:
+            mask_depth = float(mask_depth)
+        except (TypeError, ValueError):
+            mask_depth = 18.0
         succeeded = 0
         for index, input_path in enumerate(files, 1):
             self.log_queue.put(
                 f"=== [{index}/{len(files)}] {os.path.basename(input_path)} ==="
             )
             output_path = None
+            # If a custom asset name is specified and converting a single file
+            single_name = asset_name if (asset_name and len(files) == 1) else None
             if not same_folder and output_dir:
-                base = os.path.splitext(os.path.basename(input_path))[0]
-                output_path = os.path.join(
-                    output_dir, base + pipeline.OUTPUT_SUFFIX + ".ogg"
+                output_path = pipeline.default_output_path(
+                    input_path, output_dir=output_dir, custom_name=single_name
+                )
+            elif single_name:
+                output_path = pipeline.default_output_path(
+                    input_path, custom_name=single_name
                 )
             try:
                 result = pipeline.craft(
@@ -231,10 +308,20 @@ class CoolinApp(tk.Tk):
                     output_path=output_path,
                     fake_seconds=seconds,
                     codec=codec,
+                    method=method,
+                    mask_depth=mask_depth,
+                    asset_name=single_name,
                     log=self.log_queue.put,
                 )
                 succeeded += 1
-                self.log_queue.put(f"      OK: {result.output_path}")
+                if result.chunk_paths:
+                    for chunk_path in result.chunk_paths:
+                        self.log_queue.put(f"      chunk: {chunk_path}")
+                    self.log_queue.put(
+                        f"      OK: {len(result.chunk_paths)} chunk file(s) written"
+                    )
+                else:
+                    self.log_queue.put(f"      OK: {result.output_path}")
             except Exception as exc:
                 self.log_queue.put(f"      FAILED: {exc}")
             self.log_queue.put(_PROGRESS_TICK)

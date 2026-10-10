@@ -1,13 +1,9 @@
-"""Coolin - convert any audio into a "Discord 2-second" OGG file.
+"""Coolin - get full songs into Roblox at original quality (and Discord tricks).
 
-The resulting OGG carries the *full* song, but its declared duration is
-rewritten (last-page Ogg granule position + CRC fix-up), so:
-
-* Discord's built-in audio player stops after ~2 seconds.
-* VLC plays the whole song.
-* FMOD and the default Windows media players refuse to play it.
+Default method: chunked - splits any-length songs into lossless, upload-safe
+chunk files plus a gapless in-game playlist script.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.5.0"
 
 __all__ = ["ffmpeg", "ogg", "pipeline", "__version__"]

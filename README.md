@@ -1,130 +1,134 @@
 # Coolin 🎧
 
-**Audio file inserter → OGG converter with a rewritten declared duration.**
+**One asset, original pitch & speed — the closest a full song can get to Roblox, plus Discord preview tricks.**
 
-Coolin takes any audio file you insert (MP3, WAV, FLAC, M4A, …), converts it
-to OGG, and then performs a tiny piece of Ogg container surgery: it rewrites
-the file's **declared duration** (default: **2 seconds**) while leaving every
-single audio packet inside the file untouched.
+Roblox's hard import limits (per the [official docs](https://create.roblox.com/docs/en-us/audio/assets)): single stream, `.mp3`/`.ogg`/`.wav`/`.flac`, **< 20 MB**, **< 7 minutes**, ≤ 48 kHz, mono/stereo — and Studio **transcodes every upload** (so it measures the *decoded* duration, not metadata).
 
-The result behaves differently depending on who plays it:
+### What the research found (the "secret" is: no trick was needed)
 
-| Player                        | What happens                                                        |
-| ----------------------------- | ------------------------------------------------------------------- |
-| **Discord's audio player**    | Plays only the first ~2 seconds, then stops.                        |
-| **VLC**                       | Plays the whole song normally.                                      |
-| **FMOD**                      | Refuses to play the file (broken/non-monotonic granule positions + no native OGG/Opus decoding). |
-| **Windows default players**   | Refuse the file (no native OGG/Opus codec in WMP/Groove/Media Player). |
+- **7 minutes applies to everyone** — there is no 10-second tier for private uploads (that limit is only for marketplace/public distribution). 100 uploads/month unverified, 2,000 verified.
+- **Opus-in-Ogg uploads are fragile on Roblox** — *"the audio engine expects ogg-vorbis"* (devforum); many "duration too long" / "asset creation failed" reports are actually codec/container handling issues, and **MP3 is the most upload-reliable format** per multiple community threads.
+- **Uploads near the 7:00 limit are a known bug zone** ("Cannot upload audio despite meeting requirements" — official bug thread, with random rejections). Stay at ≤ 6:58 and use Studio's Asset Manager; retry if the website flakes.
+- **Metadata tricks cannot work, ever**: Roblox re-encodes every upload and stores *their* transcode — the game plays their file, and the duration check decodes. Anything hidden inside a container is either measured (rejected) or discarded.
+- **Video assets are worse** for audio: 5-minute cap, 2,000 Robux each, 13+ ID-verified only.
+- Therefore for songs **≤ 6:58** the optimal upload is a *plain, clean, maximally-compatible file*: **lossless FLAC** (falls back to **320 kbps MP3** if the song won't fit 20 MB losslessly) — which is exactly what the `single` method produces.
 
-It is a Python application with both a **GUI** and a **CLI**, and it runs on
-Windows out of the box.
+## Every known method, compared
 
-## How the trick works
+| # | Method | Quality | Beats duration limit? | Notes |
+|---|---|---|---|---|
+| 1 | **`single` — one clean lossless asset** ⭐ (default) | **Original (lossless FLAC)** | ✅ up to 6:58 | One asset, original pitch & speed, no tricks. FLAC → 320k MP3 fallback; 6:58 cap dodges the near-limit upload bug. |
+| 2 | **`chunked` — lossless chunk split + in-game playlist** | **Original (lossless source)** | ✅ Any song length | Each chunk is a *genuinely* valid short file — nothing to detect. Roblox's own transcode is the only lossy step. Use this for songs longer than 6:58. |
+| 3 | **`monogate` — masked in stereo, clean in mono** | Original (in-game) | ✅ up to 6:58 | The **inverse of phase-inversion**: `L = music + noise, R = music − noise`. The stereo web preview/moderation hears only pink noise (music masked ~18 dB beneath); in-game 3D sounds play as **mono** (L+R), cancelling the noise → clean music. Sound must be parented to a Part/Attachment. |
+| 4 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
+| 5 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
+| 6 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
+| 7 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
+| 8 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
+| 9 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
+| 10 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
+| 11 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
+| 12 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
+| 13 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
 
-An Ogg file is a chain of *pages*. The length of the audio is derived from
-the **granule position** stored in the **last page** of the stream. Coolin:
+## The `chunked` method (default) — how it gets closest to the original
 
-1. transcodes your input to a clean OGG (Opus preferred — that is what
-   Discord is happiest with, and it is undecodable by FMOD / the default
-   Windows players),
-2. overwrites the last page's granule position with
-   `fake_seconds × sample_rate` (Opus granules are always 48 kHz),
-3. recomputes that page's Ogg CRC-32 so the container stays "valid".
+1. **No length cap.** The full song — any length, even 20 minutes — goes in.
+2. **Fewest uploads.** Chunks default to the maximum legal length (6:59): a 3-minute song is *one* upload, a 10-minute song is *two*.
+3. **Quality ladder per chunk** (auto, size-checked against the 20 MB limit after encoding):
+   - **WAV** (lossless PCM 48 kHz) when the chunk is ≤ ~95 s
+   - **FLAC** (lossless) whenever it fits under 20 MB
+   - **OGG/Opus at up to 256 kbps** (transparent) as the guaranteed-fit fallback
+4. **Nothing to detect.** Every chunk is a clean, single-stream file with real duration and real metadata — it passes import validation *on its own merits*.
+5. **Gapless in-game playlist.** The generated Lua Script preloads every chunk (`ContentProvider:PreloadAsync`), switches 0.05 s early via `Heartbeat` (with an `Ended` fallback), and supports `LOOP`/`VOLUME`.
 
-The timeline stored in all the *other* pages still runs to the end of the
-song, so:
+Since Roblox transcodes every upload anyway, feeding it **lossless** chunks means Roblox's own transcode is the *only* lossy step — i.e. **as close to the original song as the platform physically allows**.
 
-- players that trust the declared duration and stop at it (Discord runs on
-  Chromium/Electron, which does exactly that) cut off after ~2 seconds,
-- players that simply demux packets until the real end of file (VLC) play
-  the whole song,
-- strict demuxers (FMOD) choke on the now non-monotonic granule positions.
+### Usage
+
+```bat
+:: default: ONE clean asset (lossless FLAC, or 320k MP3 if too big), 6:58 cap
+python coolin_cli.py song.mp3
+
+:: same, explicitly
+python coolin_cli.py song.mp3 -m single
+
+:: masked in the stereo preview, clean in-game (3D mono playback)
+python coolin_cli.py song.mp3 -m monogate
+
+:: stronger masking (quieter in-game), or weaker (louder in-game)
+python coolin_cli.py song.mp3 -m monogate --mask-depth 24
+
+:: keep the WHOLE song when it's longer than 6:58: chunked split instead
+python coolin_cli.py song.mp3 -m chunked -d 6:59
+
+:: force a chunk format (auto is recommended)
+python coolin_cli.py song.mp3 -m chunked -f flac
+```
+
+Then: upload every chunk → paste the returned asset IDs into the script's `CHUNK_IDS` table (in order) → put the Script in a Part or SoundService.
+
+If your account is under stricter duration limits than 7 minutes, set a smaller chunk length, e.g. `-d 10`.
+
+### The `monogate` method — silent in the stereo preview, audible in-game
+
+The **inverse** of the classic phase-inversion trick. Roblox 3D sounds (a `Sound` parented to a Part or Attachment) are converted to **mono** for spatial playback, while the website preview plays **stereo**. `monogate` exploits that asymmetry:
+
+```
+L = music + noise        stereo (preview):  each ear hears loud pink noise,
+R = music − noise                          the music buried ~18 dB beneath it
+L + R = 2 × music        mono (in-game):    the noise cancels — clean music
+```
+
+- **Verify before uploading:** Coolin writes `<song>_test_mono.wav` — play it to hear exactly what your game will hear (clean music). Play the output file normally to hear what the preview hears (noise only).
+- **In-game requirements (generated script does this):** the Sound must be parented to a **Part or Attachment** (3D) — a 2D Sound (SoundService) plays stereo = noise. `Volume = 10` compensates the mask depth.
+- `--mask-depth` (default 18 dB): higher = stronger masking but quieter in-game; lower = louder in-game but more audible in the preview.
+- Caveat: this relies on Roblox's 3D mono conversion *summing* the channels (standard downmix). Test in Studio with your own ears first — the proof file makes that a 10-second check.
+
+## Other methods
+
+```bat
+:: phase inversion: silent in mono previews/moderation, plays in-game
+python coolin_cli.py song.mp3 -m invert
+
+:: speed inversion: physically short file, restored in-game via PlaybackSpeed
+python coolin_cli.py song.mp3 -m speed -d 2
+
+:: Discord preview trick: stops at 2s in Discord, VLC plays the full song
+python coolin_cli.py song.mp3 -m multistream -d 2
+
+:: inspect any crafted OGG (declared vs really-inside duration)
+python coolin_cli.py --verify song_discord.ogg
+```
 
 ## Requirements
 
 - Python 3.8+ (tkinter ships with the standard Windows installer)
-- Nothing else — the dependency below bundles ffmpeg:
-
-```bat
-pip install -r requirements.txt
-```
-
-`requirements.txt` installs [`imageio-ffmpeg`](https://pypi.org/project/imageio-ffmpeg/),
-which ships a static ffmpeg binary, so **you do not need to install ffmpeg
-yourself on Windows**. If you already have ffmpeg on your PATH, Coolin uses
-that one instead.
+- `pip install -r requirements.txt` — bundles a static ffmpeg via [`imageio-ffmpeg`](https://pypi.org/project/imageio-ffmpeg/)
 
 ## Using the GUI (Windows)
 
 Double-click **`run_gui.bat`** (or run `python coolin_gui.py`):
 
-1. **Insert audio file(s)** — add one or more songs (any format ffmpeg understands).
-2. Pick the output folder (or keep *"write next to each input file"*).
-3. Set the **Discord duration** in seconds (default `2.0`) and the codec
-   (`auto` keeps Opus, the recommended choice).
-4. Press **Convert to Discord OGG**.
-
-Outputs are named `<original name>_discord.ogg`.
-
-## Using the CLI
-
-```bat
-:: convert with defaults (2.0s declared duration, Opus)
-python coolin_cli.py song.mp3
-
-:: choose output path and duration
-python coolin_cli.py song.mp3 -o output.ogg -d 2
-
-:: batch + force Vorbis codec
-python coolin_cli.py a.mp3 b.flac -d 3 --codec vorbis
-
-:: inspect an OGG file (is it a Coolin-crafted one?)
-python coolin_cli.py --verify song_discord.ogg
-```
-
-On Windows you can use `run_cli.bat` instead of `python coolin_cli.py`.
-
-Example `--verify` output:
-
-```
-File:                song_discord.ogg
-Codec:               opus @ 48000 Hz granule base
-Ogg pages:           28 (serial 3990938213)
-Declared duration:   0:02.00
-Audio really inside: 0:25.00
-Last page EOS flag:  True
-Granules monotonic:  False
-All page CRCs valid: True
-Verdict:             Coolin-crafted file (fake short duration).
-```
-
-## Building a standalone Coolin.exe
-
-```bat
-build_exe.bat
-```
-
-This uses PyInstaller and bundles the static ffmpeg binary; the result lands
-in `dist\Coolin.exe`.
+1. **Insert audio file(s)** — add one or more songs.
+2. **Method** defaults to `chunked` (best). Set the per-chunk length (default 6:59).
+3. Press **Convert** — chunk files and the playlist script appear in the log.
 
 ## Project layout
 
 ```
-coolin_gui.py        tkinter GUI application (Windows-friendly)
+coolin_gui.py        tkinter GUI application
 coolin_cli.py        command line interface
 coolin/
-  pipeline.py        high-level convert + duration-rewrite workflow
-  ffmpeg.py          ffmpeg discovery (PATH or imageio-ffmpeg) + conversion
-  ogg.py             Ogg page parser, Ogg CRC-32, granule-position surgery
-tests/test_ogg.py    unit tests (CRC, patching, full-decode integrity)
+  pipeline.py        high-level convert + methods (chunked/invert/speed/multistream)
+  ffmpeg.py          ffmpeg discovery + conversion (ogg/wav/flac segments)
+  ogg.py             Ogg page parser, Ogg CRC-32, container utilities
+tests/test_ogg.py    unit tests (CRC, duration limits, chunking integrity)
 ```
 
 ## Notes & disclaimer
 
-- The fake duration must be **shorter** than the real song; Coolin rejects
-  anything else.
-- Opus is the default on purpose: OGG/Opus is what Discord expects, and it
-  maximizes the "won't play anywhere strict" behavior (FMOD, WMP).
+- Import limits per the [Roblox audio assets docs](https://create.roblox.com/docs/en-us/audio/assets): < 7 min, < 20 MB, ≤ 48 kHz, mono/stereo, single stream, mp3/ogg/wav/flac. ID-verified accounts: 2,000 free uploads / 30 days; unverified: 100.
+- Asset (file) names are kept within the 1–50 character limit automatically.
+- Only upload audio you have the rights to use.
 - Run the tests with `python -m unittest discover -s tests -v`.
-- This is a novelty tool for your own files. Don't use it to confuse other
-  people's players in ways they didn't sign up for.
