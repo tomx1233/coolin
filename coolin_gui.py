@@ -122,6 +122,7 @@ class CoolinApp(tk.Tk):
         controls = ttk.Frame(options_frame)
         controls.grid(row=4, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
+        self.seconds_var = tk.StringVar()
         self._default_seconds_for_method(self.method_var.get())
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")

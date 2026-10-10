@@ -516,5 +516,49 @@ class OggCraftingTest(unittest.TestCase):
             self.assertTrue(report["all_crcs_valid"])
 
 
+    def test_gui_builds_without_use_before_assignment(self):
+        """Regression test for the AttributeError crash:
+        'CoolinApp' object has no attribute 'seconds_var'.
+        Statically checks _build_ui: every data attribute must be assigned
+        before it is used (no tkinter required)."""
+        import ast
+        gui_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "coolin_gui.py")
+        with open(gui_path) as handle:
+            tree = ast.parse(handle.read())
+        klass = next(n for n in ast.walk(tree)
+                     if isinstance(n, ast.ClassDef) and n.name == "CoolinApp")
+        method_names = {n.name for n in klass.body if isinstance(n, ast.FunctionDef)}
+        build = next(n for n in klass.body
+                     if isinstance(n, ast.FunctionDef) and n.name == "_build_ui")
+
+        def iter_stmts(body):
+            for stmt in body:
+                yield stmt
+                for field in ("body", "orelse", "finalbody"):
+                    sub = getattr(stmt, field, None)
+                    if sub:
+                        yield from iter_stmts(sub)
+
+        assigned = set()
+        for stmt in iter_stmts(build.body):
+            targets = []
+            if isinstance(stmt, ast.Assign):
+                targets = stmt.targets
+            elif isinstance(stmt, ast.AnnAssign) and stmt.target:
+                targets = [stmt.target]
+            for t in targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "self":
+                        assigned.add(n.attr)
+            for n in ast.walk(stmt):
+                if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                        and n.value.id == "self" and n.attr not in assigned
+                        and n.attr not in method_names):
+                    self.fail(
+                        f"coolin_gui.py line {stmt.lineno}: self.{n.attr} used "
+                        f"before assignment in _build_ui (GUI would crash on launch)"
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
