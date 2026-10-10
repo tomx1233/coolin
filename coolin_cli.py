@@ -20,11 +20,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="coolin",
         description=(
-            "Convert audio into Roblox-ready assets. Default method 'single': ONE "
-            "clean asset at original pitch & speed (lossless FLAC, or 320k MP3 if "
-            "too big), capped at 6:58 to stay safely under Roblox's 7-minute "
-            "import limit. Method 'chunked' splits songs of ANY length into "
-            "lossless upload-safe chunks plus a gapless in-game playlist script."
+            "Convert audio into Roblox-ready assets. Default method 'vorbis': "
+            "replicates the field-tested gtiiii.ogg profile (plain Ogg Vorbis "
+            "44.1 kHz stereo ~160 kbps) - Roblox's native audio format, accepted "
+            "immediately on upload. Other methods: 'single' (lossless FLAC), "
+            "'chunked' (any-length songs as upload-safe chunks + playlist), and "
+            "hiding methods 'eqmask'/'bait'."
         ),
     )
     parser.add_argument("inputs", nargs="*", help="audio files to convert")
@@ -45,10 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
-        default=pipeline.METHOD_SINGLE,
+        choices=("vorbis", "single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
+        default=pipeline.METHOD_VORBIS,
         help=(
-            "conversion method: 'single' (ONE clean asset at original pitch & speed - lossless "
+            "conversion method: 'vorbis' (RECOMMENDED: replicates the field-tested gtiiii.ogg "
+            "profile - plain Ogg Vorbis 44.1 kHz stereo ~160 kbps, no metadata - the format "
+            "Roblox's audio engine natively speaks, so uploads are accepted immediately; the "
+            "generated script includes the official fixes for the plays-on-web-but-not-in-game "
+            "bug), "
+            "'single' (ONE clean asset at original pitch & speed - lossless "
             "FLAC or 320k MP3, capped at 6:58 to dodge Roblox's near-limit upload bug; longer "
             "songs are trimmed), 'chunked' (splits the full song - any length, even over 6:59 - "
             "into lossless upload-safe chunk files and generates an in-game Script that plays "
@@ -134,7 +140,8 @@ def main(argv=None) -> int:
             if args.method == pipeline.METHOD_CHUNKED:
                 raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
             elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
-                                 pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT):
+                                 pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT,
+                                 pipeline.METHOD_VORBIS):
                 raw_seconds = pipeline.SINGLE_MAX_SECONDS
             else:
                 raw_seconds = pipeline.DEFAULT_FAKE_SECONDS

@@ -28,7 +28,9 @@ METHOD_SINGLE = "single"
 METHOD_MONOGATE = "monogate"
 METHOD_EQMASK = "eqmask"
 METHOD_BAIT = "bait"
+METHOD_VORBIS = "vorbis"
 SUPPORTED_METHODS = (
+    METHOD_VORBIS,
     METHOD_INVERT,
     METHOD_SPEED,
     METHOD_INVERT_SPEED,
@@ -39,6 +41,12 @@ SUPPORTED_METHODS = (
     METHOD_EQMASK,
     METHOD_BAIT,
 )
+
+# The gtiiii.ogg field-tested profile (see README): plain Ogg Vorbis,
+# 44.1 kHz stereo, ~160 kbps (nominal 160000 in the Vorbis ID header),
+# no metadata - the format Roblox's audio engine natively speaks.
+VORBIS_SAMPLE_RATE = 44100
+VORBIS_NOMINAL_BITRATE = 160_000
 
 # eqmask: how deeply the low+mid bands are cut at encode (dB).  Roblox's
 # AudioEqualizer boosts at most +10 dB per band per instance, so the in-game
@@ -262,6 +270,16 @@ def craft(
       CAVEAT: relies on Roblox's 3D mono downmix actually SUMMING channels -
       newer engine versions keep 3D sounds directional/stereo, which breaks
       this.  Use 'eqmask' instead: it does not depend on channel handling.
+    - 'vorbis': Replicates the field-tested gtiiii.ogg profile - a plain
+      Ogg Vorbis file at 44.1 kHz stereo, ~160 kbps (nominal 160000 in the
+      Vorbis ID header) with zero metadata tags.  Vorbis is the format
+      Roblox's audio engine natively speaks ("the audio engine expects
+      ogg-vorbis" - Roblox staff on devforum), so this profile is accepted
+      immediately on upload with no transcode surprises.  Same 6:58 cap as
+      'single'.  The generated script includes the documented fixes for the
+      'plays on the website but not in-game' private-audio bug (insert from
+      Toolbox -> Inventory instead of pasting the ID, or grant the experience
+      asset permissions).
     - 'bait': The decoy method.  LEFT channel carries a clean, innocent BAIT
       sound (an audio file of your choice via bait_path, looped to cover the
       song, or a generated soft chime); RIGHT channel carries the song with
@@ -592,6 +610,85 @@ def craft(
         log(
             f"      Wrote {len(chunk_paths)} chunk file(s); upload them all and paste "
             f"their asset IDs into the script below."
+        )
+    elif method == METHOD_VORBIS:
+        # Replicate the field-tested gtiiii.ogg profile: plain Ogg Vorbis,
+        # 44.1 kHz stereo, ~160 kbps, no metadata.  Roblox's audio engine
+        # natively speaks ogg-vorbis, so this uploads/accepts instantly.
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)
+        encode_dur = full_dur
+        if full_dur > cap:
+            log(
+                f"[3/4] Vorbis Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"trimming to {ogg_util.format_seconds(cap)} (single-asset platform limit; "
+                f"use -m chunked to keep the whole song)."
+            )
+            encode_dur = cap
+        else:
+            log(
+                f"[3/4] Vorbis Method: encoding the full {ogg_util.format_seconds(full_dur)} "
+                f"song in the gtiiii.ogg profile (Ogg Vorbis, {VORBIS_SAMPLE_RATE} Hz stereo, "
+                f"~160 kbps, no metadata) - Roblox's native audio format, "
+                f"accepted immediately on upload..."
+            )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+        path = os.path.join(out_dir, f"{out_base}.ogg")
+        if os.path.normcase(path) == os.path.normcase(input_path):
+            path = os.path.join(out_dir, f"{out_base}_vorbis.ogg")
+
+        encoder = ffmpeg_util.convert_segment(
+            exe, input_path, path, fmt="vorbis", duration=encode_dur,
+            audio_filter=pan_filter(pan_hz), log=log,
+        )
+        output_path = path
+        if os.path.getsize(path) > MAX_UPLOAD_BYTES:
+            raise RuntimeError(
+                "Vorbis output exceeded the 20 MB upload limit "
+                "(should be impossible at 160 kbps / 6:58)"
+            )
+        if pan_hz:
+            log(f"      Pan: ear-to-ear panning baked in at {pan_hz:g} Hz.")
+
+        # Verify the replicated profile straight from the output's headers.
+        with open(path, "rb") as handle:
+            out_data = handle.read()
+        out_pages = ogg_util.parse_pages(out_data)
+        out_codec, out_rate = ogg_util.detect_codec(out_data, out_pages)
+        declared_seconds = ffmpeg_util.probe_duration(exe, path) or encode_dur
+        actual_seconds = declared_seconds
+        size_mb = os.path.getsize(path) / 1_000_000
+        log(
+            f"      Wrote {path} [{out_codec} {out_rate} Hz stereo | "
+            f"{ogg_util.format_seconds(declared_seconds)} | {size_mb:.2f} MB]"
+        )
+        log(
+            "      Upload this ONE file (Studio's Asset Manager is the most reliable "
+            "importer).  If the asset then plays on the website but NOT in game, "
+            "that is Roblox's documented private-audio bug - see the script below "
+            "for the two official fixes."
+        )
+        in_game_script = (
+            f"-- Vorbis Method ({ogg_util.format_seconds(declared_seconds)}, gtiiii.ogg "
+            f"profile: Ogg Vorbis {VORBIS_SAMPLE_RATE} Hz stereo ~160 kbps)\n"
+            "-- Instant-accept profile: Roblox's audio engine natively speaks ogg-vorbis.\n"
+            "--\n"
+            "-- IF IT PLAYS ON THE WEBSITE BUT NOT IN-GAME (asset shows 0:00):\n"
+            "-- That is Roblox's documented private-audio bug, NOT the file. Fix:\n"
+            "--   1) Studio -> Toolbox -> Inventory (Creator) -> find the audio -> Insert.\n"
+            "--      Do NOT paste the sound ID by hand - pasted IDs stay silent.\n"
+            "--   2) Or create.roblox.com -> your audio asset -> '...' menu ->\n"
+            "--      Asset Permissions -> add this experience to the allowed list.\n"
+            "-- Then:\n"
+            f"local sound = script.Parent\n"
+            f'sound.SoundId = "rbxassetid://0" -- your uploaded asset ID\n'
+            f"sound.Volume = 1\n"
+            f"sound:Play()\n"
         )
     elif method == METHOD_SINGLE:
         # ONE clean asset, original pitch and speed, no tricks.  Research

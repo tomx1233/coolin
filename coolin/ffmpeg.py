@@ -168,6 +168,19 @@ def convert_segment(
         else:
             codec_args = encoder_args(encoder)
         codec = encoder
+    elif fmt == "vorbis":
+        # The gtiiii.ogg profile: plain Ogg Vorbis, 44.1 kHz stereo, ~160 kbps
+        # (nominal 160000 in the Vorbis ID header), zero metadata tags.
+        # Vorbis is the format Roblox's own audio engine natively speaks, so
+        # this profile uploads/accepts instantly with no transcode surprises.
+        encoders = available_encoders(exe)
+        if "libvorbis" in encoders:
+            codec_args = ["-c:a", "libvorbis", "-q:a", "5"]
+            codec = "libvorbis"
+        else:
+            codec_args = ["-c:a", "vorbis", "-q:a", "5", "-strict", "-2"]
+            codec = "vorbis"
+        codec_args += ["-ar", "44100", "-ac", "2", "-map_metadata", "-1"]
     else:
         raise ValueError(f"Unsupported chunk format: {fmt!r}")
     seek_args = ["-ss", str(start_time)] if start_time is not None else []

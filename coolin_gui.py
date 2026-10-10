@@ -111,9 +111,10 @@ class CoolinApp(tk.Tk):
 
         ttk.Label(options_frame, text="Method:").grid(
             row=4, column=0, sticky="w", padx=8, pady=(4, 4))
-        self.method_var = tk.StringVar(value=pipeline.METHOD_SINGLE)
+        self.method_var = tk.StringVar(value=pipeline.METHOD_VORBIS)
         ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
                      values=(
+                         pipeline.METHOD_VORBIS,
                          pipeline.METHOD_SINGLE,
                          pipeline.METHOD_CHUNKED,
                          pipeline.METHOD_EQMASK,
@@ -125,7 +126,7 @@ class CoolinApp(tk.Tk):
                          pipeline.METHOD_MULTISTREAM,
                      ),
                      state="readonly").grid(row=4, column=1, sticky="w", padx=4, pady=(4, 4))
-        ttk.Label(options_frame, text="single = ONE asset, original pitch & speed (best)").grid(
+        ttk.Label(options_frame, text="vorbis = instant-accept profile (best)").grid(
             row=4, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Per-chunk / Discord duration (max 6:59):").grid(
@@ -167,7 +168,7 @@ class CoolinApp(tk.Tk):
         self.log_text.pack(fill="both", expand=True, **pad)
         self.log(
             "Insert one or more audio files, pick a Method, and press Convert.\n"
-            "single (best): ONE asset, original pitch & speed, lossless FLAC or 320k MP3\n"
+            "vorbis (best): instant-accept profile (Ogg Vorbis 44.1 kHz 160 kbps)\n"
             "chunked: full songs of ANY length as lossless upload-safe chunks + playlist script\n"
             "invert: silent in mono previews  |  speed: short file, restored in game  |  multistream: Discord stops early, VLC plays all"
         )
@@ -185,7 +186,8 @@ class CoolinApp(tk.Tk):
         if method == pipeline.METHOD_CHUNKED:
             default = pipeline.DEFAULT_CHUNK_SECONDS
         elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
-                        pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT):
+                        pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT,
+                        pipeline.METHOD_VORBIS):
             default = pipeline.SINGLE_MAX_SECONDS
         else:
             default = pipeline.DEFAULT_FAKE_SECONDS

@@ -479,6 +479,65 @@ class OggCraftingTest(unittest.TestCase):
         self.assertIsNotNone(probed)
         self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
 
+    def test_vorbis_method_replicates_gtiiii_profile(self):
+        """Vorbis method: output must match the field-tested gtiiii.ogg profile
+        exactly - Ogg Vorbis, 44.1 kHz stereo, nominal 160 kbps in the Vorbis
+        ID header, zero metadata, clean single-stream container - plus the
+        in-game script with the plays-on-web-only fixes."""
+        out_path = os.path.join(self.tmpdir.name, "vorbis_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="vorbis",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        self.assertTrue(res.output_path.endswith(".ogg"))
+
+        data = self._read(res.output_path)
+        pages = ogg_util.parse_pages(data)
+        codec, rate = ogg_util.detect_codec(data, pages)
+        self.assertEqual(codec, "vorbis")
+        self.assertEqual(rate, pipeline.VORBIS_SAMPLE_RATE)
+
+        # Vorbis ID header: channels + nominal bitrate must match gtiiii.ogg.
+        p1 = pages[0]
+        body = data[p1.offset + 27 + p1.num_segments:
+                    p1.offset + 27 + p1.num_segments + p1.body_size]
+        self.assertTrue(body.startswith(b"\x01vorbis"))
+        channels = body[11]
+        nominal = struct.unpack_from("<I", body, 20)[0]
+        self.assertEqual(channels, 2)
+        self.assertEqual(nominal, pipeline.VORBIS_NOMINAL_BITRATE)
+
+        # Comment header: input metadata stripped.  (The muxer always appends
+        # its own single ENCODER tag - cosmetic, no upload impact; gtiiii.ogg
+        # simply predates it.  No title/artist tags may survive.)
+        p2 = pages[1]
+        body2 = data[p2.offset + 27 + p2.num_segments:
+                     p2.offset + 27 + p2.num_segments + p2.body_size]
+        self.assertTrue(body2.startswith(b"\x03vorbis"))
+        vlen = struct.unpack_from("<I", body2, 7)[0]
+        ncomments = struct.unpack_from("<I", body2, 11 + vlen)[0]
+        self.assertLessEqual(ncomments, 1)
+
+        # Clean single-stream container, CRCs valid, BOS+EOS present.
+        report = ogg_util.describe(data)
+        self.assertEqual(report["chained_streams"], 1)
+        self.assertTrue(report["all_crcs_valid"])
+        self.assertTrue(report["last_page_is_eos"])
+        self.assertTrue(report["granules_monotonic"])
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+
+        # Duration is the full song at original pitch/speed.
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+
+        # The script carries the plays-on-web-but-not-in-game fixes.
+        self.assertIn("Toolbox", res.in_game_script)
+        self.assertIn("Inventory", res.in_game_script)
+        self.assertIn("Asset Permissions", res.in_game_script)
+        self.assertIn("sound:Play()", res.in_game_script)
+        self.assertNotIn("PlaybackSpeed", res.in_game_script)
+
     def test_single_method_one_clean_asset(self):
         """Single method: ONE clean file at original pitch & speed - lossless
         FLAC when it fits, under the 7:00 limit and the 20 MB size limit."""
