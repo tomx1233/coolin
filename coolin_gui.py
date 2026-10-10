@@ -124,6 +124,7 @@ class CoolinApp(tk.Tk):
                      values=(
                          pipeline.METHOD_VORBIS,
                          pipeline.METHOD_AUDIOCODE,
+                         pipeline.METHOD_TURBO,
                          pipeline.METHOD_SINGLE,
                          pipeline.METHOD_CHUNKED,
                          pipeline.METHOD_EQMASK,
@@ -155,6 +156,10 @@ class CoolinApp(tk.Tk):
         self.mask_depth_var = tk.StringVar(value="18")
         ttk.Spinbox(controls, from_=6, to=30, increment=1, width=4,
                     textvariable=self.mask_depth_var).pack(side="left")
+        ttk.Label(controls, text="   Turbo x:").pack(side="left", padx=(8, 4))
+        self.speed_factor_var = tk.StringVar(value="2")
+        ttk.Spinbox(controls, from_=1.25, to=4, increment=0.25, width=4,
+                    textvariable=self.speed_factor_var).pack(side="left")
         ttk.Label(controls, text="   Codec:").pack(side="left", padx=(8, 4))
         self.codec_var = tk.StringVar(value="auto")
         ttk.Combobox(controls, textvariable=self.codec_var, width=8,
@@ -178,6 +183,7 @@ class CoolinApp(tk.Tk):
         self.log(
             "Insert one or more audio files, pick a Method, and press Convert.\n"
             "vorbis (best): instant-accept profile (Ogg Vorbis 44.1 kHz 160 kbps)\n"
+            "turbo: sped up (chipmunk) in every viewer, normal speed+pitch in game\n"
             "chunked: full songs of ANY length as lossless upload-safe chunks + playlist script\n"
             "invert: silent in mono previews  |  speed: short file, restored in game  |  multistream: Discord stops early, VLC plays all"
         )
@@ -196,7 +202,8 @@ class CoolinApp(tk.Tk):
             default = pipeline.DEFAULT_CHUNK_SECONDS
         elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
                         pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT,
-                        pipeline.METHOD_VORBIS, pipeline.METHOD_AUDIOCODE):
+                        pipeline.METHOD_VORBIS, pipeline.METHOD_AUDIOCODE,
+                        pipeline.METHOD_TURBO):
             default = pipeline.SINGLE_MAX_SECONDS
         else:
             default = pipeline.DEFAULT_FAKE_SECONDS
@@ -311,19 +318,24 @@ class CoolinApp(tk.Tk):
                   self.same_folder_var.get(), self.output_dir_var.get().strip(),
                   raw_asset_name, self.method_var.get(),
                   self.mask_depth_var.get(), self.bait_path_var.get().strip(),
-                  self.pan_hz_var.get(), self.cues_var.get().strip()),
+                  self.pan_hz_var.get(), self.cues_var.get().strip(),
+                  self.speed_factor_var.get()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path, pan_hz, cues) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path, pan_hz, cues, speed_factor) -> None:
         try:
             pan_hz = float(pan_hz)
         except (TypeError, ValueError):
             pan_hz = 0.0
         if pan_hz <= 0:
             pan_hz = None
+        try:
+            speed_factor = float(speed_factor)
+        except (TypeError, ValueError):
+            speed_factor = None
         try:
             mask_depth = float(mask_depth)
         except (TypeError, ValueError):

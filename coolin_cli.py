@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("vorbis", "audiocode", "single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
+        choices=("vorbis", "audiocode", "turbo", "single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
         default=pipeline.METHOD_VORBIS,
         help=(
             "conversion method: 'vorbis' (RECOMMENDED: replicates the field-tested gtiiii.ogg "
@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
             "'audiocode' (embeds a code INSIDE the audio file - quiet marker tones on "
             "the left channel - that makes the generated in-game script switch between "
             "different audio files at the coded moments; supply cues with --cue), "
+            "'turbo' (sped up in every plain audio viewer - Discord, browsers, media "
+            "players, the Roblox website all play it fast and chipmunked - but normal "
+            "speed and pitch in game via ONE Sound.PlaybackSpeed property; factor via "
+            "-s, default 2x; the file is factor-times shorter, so one 6:58 asset holds "
+            "up to 13:56 of real music at 2x), "
             "'single' (ONE clean asset at original pitch & speed - lossless "
             "FLAC or 320k MP3, capped at 6:58 to dodge Roblox's near-limit upload bug; longer "
             "songs are trimmed), 'chunked' (splits the full song - any length, even over 6:59 - "
@@ -109,8 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-s", "--speed-factor", type=float, default=None,
-        help="speed multiplier for 'speed' / 'invert_speed' method (e.g. 4.0 for 4x). "
-             "Default: auto-calculated from --seconds",
+        help="speed multiplier: for 'turbo' the direct speedup factor baked into the "
+             "file (default 2.0 = chipmunk everywhere, normal in game; 1.0 < factor "
+             "<= 4.0); for 'speed' / 'invert_speed' auto-calculated from --seconds "
+             "when omitted",
     )
     parser.add_argument(
         "--codec", choices=("auto", "opus", "vorbis"), default="auto",
@@ -150,7 +157,8 @@ def main(argv=None) -> int:
                 raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
             elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
                                  pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT,
-                                 pipeline.METHOD_VORBIS, pipeline.METHOD_AUDIOCODE):
+                                 pipeline.METHOD_VORBIS, pipeline.METHOD_AUDIOCODE,
+                                 pipeline.METHOD_TURBO):
                 raw_seconds = pipeline.SINGLE_MAX_SECONDS
             else:
                 raw_seconds = pipeline.DEFAULT_FAKE_SECONDS

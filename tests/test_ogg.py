@@ -37,6 +37,21 @@ def make_tone_wav(path: str, seconds: float = TONE_SECONDS, rate: int = 44100) -
         handle.writeframes(bytes(frames))
 
 
+def make_steady_tone_wav(path: str, seconds: float = TONE_SECONDS,
+                         freq: float = 440.0, rate: int = 44100) -> None:
+    """Write a stereo steady-frequency tone WAV (no external deps)."""
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        frames = bytearray()
+        total = int(seconds * rate)
+        for i in range(total):
+            value = int(12000 * math.sin(2 * math.pi * freq * i / rate))
+            frames += struct.pack("<hh", value, value)
+        handle.writeframes(bytes(frames))
+
+
 def make_noise_wav(path: str, seconds: float = 120.0, rate: int = 44100) -> None:
     """Write a stereo white-noise WAV - the worst case for FLAC compression."""
     import random
@@ -80,13 +95,19 @@ def goertzel_power(samples: "list[int]", freq: float, rate: int) -> float:
     return s1 * s1 + s2 * s2 - coeff * s1 * s2
 
 
-def decode_channel_pcm(exe: str, path: str, channel: int) -> "tuple[list[int], int]":
-    """Decode one channel of *path* to 44.1 kHz mono s16 PCM samples."""
+def decode_channel_pcm(exe: str, path: str, channel: int,
+                       prefix_filter: str = "") -> "tuple[list[int], int]":
+    """Decode one channel of *path* to 44.1 kHz mono s16 PCM samples.
+
+    *prefix_filter* is applied before the channel selection; the turbo tests
+    use it to simulate in-game Sound.PlaybackSpeed (relabel + resample is
+    exactly what Roblox's playback resampler does)."""
     import subprocess as sp
+    filt = ",".join(f for f in (prefix_filter, f"pan=mono|c0=c{channel}") if f)
     result = sp.run(
         [exe, "-hide_banner", "-loglevel", "error", "-i", path,
          "-vn", "-ar", "44100", "-ac", "1",
-         "-af", f"pan=mono|c0=c{channel}", "-f", "s16le", "-"],
+         "-af", filt, "-f", "s16le", "-"],
         stdout=sp.PIPE, stderr=sp.PIPE)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", "replace"))
@@ -646,6 +667,91 @@ class OggCraftingTest(unittest.TestCase):
         self.assertEqual(pipeline.parse_cues("1:2, 3:3"), [(1.0, 2), (3.0, 3)])
         self.assertEqual(pipeline.parse_cues([(1.0, 2)]), [(1.0, 2)])
         self.assertEqual(pipeline.parse_cues(None), [])
+
+    def test_turbo_method_sped_in_viewers_normal_in_game(self):
+        """Turbo: the FILE plays sped up (2x, chipmunk) in every plain audio
+        viewer, and Sound.PlaybackSpeed = 0.5 in game is the exact inverse -
+        the round trip restores the original speed, pitch and level."""
+        steady = os.path.join(self.tmpdir.name, "steady.wav")
+        make_steady_tone_wav(steady)  # 6 s of a steady 440 Hz tone
+        out_path = os.path.join(self.tmpdir.name, "turbo_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(steady, output_path=out_path, method="turbo",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             speed_factor=2.0, log=lambda _: None)
+        self.assertTrue(res.output_path.endswith(".ogg"))
+
+        # Instant-accept vorbis profile, clean single stream, upload-safe.
+        data = self._read(res.output_path)
+        pages = ogg_util.parse_pages(data)
+        codec, rate = ogg_util.detect_codec(data, pages)
+        self.assertEqual(codec, "vorbis")
+        self.assertEqual(rate, pipeline.VORBIS_SAMPLE_RATE)
+        rep = ogg_util.describe(data)
+        self.assertEqual(rep["chained_streams"], 1)
+        self.assertTrue(rep["all_crcs_valid"])
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+
+        # What every plain viewer sees: HALF the duration, doubled pitch.
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS / 2, delta=0.3)
+        self.assertAlmostEqual(res.declared_seconds, TONE_SECONDS / 2, delta=0.3)
+        self.assertAlmostEqual(res.actual_seconds, TONE_SECONDS, delta=0.6)
+        left, drate = decode_channel_pcm(self.ffmpeg, res.output_path, 0)
+        p880 = goertzel_power(left, 880.0, drate)
+        p440 = goertzel_power(left, 440.0, drate)
+        self.assertGreater(p880 / max(p440, 1e-9), 100.0)  # chipmunk: 440 -> 880
+
+        # In-game simulation: Sound.PlaybackSpeed = 0.5 on a 44.1 kHz asset is
+        # exactly 'relabel to 22050 Hz and resample back' - same restore math.
+        rest, rrate = decode_channel_pcm(self.ffmpeg, res.output_path, 0,
+                                         prefix_filter="asetrate=22050,aresample=44100")
+        self.assertAlmostEqual(len(rest) / rrate, TONE_SECONDS, delta=0.3)
+        q440 = goertzel_power(rest, 440.0, rrate)
+        q880 = goertzel_power(rest, 880.0, rrate)
+        self.assertGreater(q440 / max(q880, 1e-9), 100.0)  # back to 440 Hz
+        # ...and at the original level (a single resample round trip).
+        restored_db = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path],
+            "asetrate=22050,aresample=44100,pan=mono|c0=c0")
+        orig_db = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", steady], "pan=mono|c0=c0")
+        self.assertAlmostEqual(restored_db, orig_db, delta=3.0)
+
+        # The generated script: ONE property, plus the private-audio fixes.
+        self.assertIn("PlaybackSpeed = 0.5", res.in_game_script)
+        self.assertIn("sound.SoundId", res.in_game_script)
+        self.assertIn("Toolbox", res.in_game_script)
+        self.assertIn("Inventory", res.in_game_script)
+        self.assertIn("Asset Permissions", res.in_game_script)
+        self.assertIn("sound:Play()", res.in_game_script)
+
+    def test_turbo_factor_validation_and_custom_factor(self):
+        """turbo rejects factors outside (1.0, 4.0]; the default is 2x; a
+        custom factor lands in both the file duration and the script."""
+        steady = os.path.join(self.tmpdir.name, "steady.wav")
+        make_steady_tone_wav(steady)
+        os.makedirs(os.path.join(self.tmpdir.name, "turbo_out"), exist_ok=True)
+        out_path = os.path.join(self.tmpdir.name, "turbo_out", "tone.ogg")
+        for bad in (0.5, 1.0, 5.0, -2.0):
+            with self.assertRaises(ValueError):
+                pipeline.craft(steady, output_path=out_path, method="turbo",
+                               fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                               speed_factor=bad, log=lambda _: None)
+        # Default factor = 2x when -s is omitted.
+        res = pipeline.craft(steady, output_path=out_path, method="turbo",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        self.assertIn("PlaybackSpeed = 0.5", res.in_game_script)
+        # Custom factor 1.5x: file = 6/1.5 = 4 s, PlaybackSpeed = 0.666667.
+        res15 = pipeline.craft(steady, output_path=out_path, method="turbo",
+                               fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                               speed_factor=1.5, log=lambda _: None)
+        self.assertIn("PlaybackSpeed = 0.666667", res15.in_game_script)
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res15.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS / 1.5, delta=0.3)
 
     def test_single_method_one_clean_asset(self):
         """Single method: ONE clean file at original pitch & speed - lossless

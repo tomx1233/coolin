@@ -30,9 +30,11 @@ METHOD_EQMASK = "eqmask"
 METHOD_BAIT = "bait"
 METHOD_VORBIS = "vorbis"
 METHOD_AUDIOCODE = "audiocode"
+METHOD_TURBO = "turbo"
 SUPPORTED_METHODS = (
     METHOD_VORBIS,
     METHOD_AUDIOCODE,
+    METHOD_TURBO,
     METHOD_INVERT,
     METHOD_SPEED,
     METHOD_INVERT_SPEED,
@@ -136,6 +138,14 @@ def write_marker_wav(path: str, total_seconds: float,
 VORBIS_SAMPLE_RATE = 44100
 VORBIS_NOMINAL_BITRATE = 160_000
 
+# turbo: how many times faster than real time the file plays in plain audio
+# viewers (Discord preview, browsers, media players, the Roblox website).
+# In game Sound.PlaybackSpeed = 1/factor is the exact inverse (speed AND
+# pitch are one resample), so the song plays at its original rate again.
+# Side effect: the in-game treble ceiling is 22050/factor Hz (11 kHz at 2x).
+TURBO_DEFAULT_FACTOR = 2.0
+TURBO_MAX_FACTOR = 4.0
+
 # eqmask: how deeply the low+mid bands are cut at encode (dB).  Roblox's
 # AudioEqualizer boosts at most +10 dB per band per instance, so the in-game
 # restore chains EQMASK_LAYERS instances (4 x 10 dB = +40 dB).
@@ -149,6 +159,23 @@ EQMASK_HIGH_HZ = 4000.0
 # between 200 and 4000 Hz with a matching octave width.
 EQMASK_MID_CENTER_HZ = 894.0
 EQMASK_MID_WIDTH_OCT = 4.32
+
+
+def turbo_filter(factor: float) -> str:
+    """Speed-up chain for the turbo method: normalize the input to the vorbis
+    rate, relabel the stream at rate*factor (plain players then consume the
+    samples *factor* times too fast - speed and pitch together, a pure
+    resample), and resample back down to the upload-safe rate.
+
+    Sound.PlaybackSpeed = 1/factor in game performs the exact opposite
+    resample, restoring the original speed AND pitch.
+    """
+    relabel = int(round(VORBIS_SAMPLE_RATE * factor))
+    return (
+        f"aresample={VORBIS_SAMPLE_RATE},"
+        f"asetrate={relabel},"
+        f"aresample={VORBIS_SAMPLE_RATE}"
+    )
 
 
 def pan_filter(pan_hz: Optional[float]) -> str:
@@ -379,6 +406,18 @@ def craft(
       inside the audio file (it survives Roblox's transcode - it is audible
       content) and the same generic script plays any coded asset.  Encoded
       in the instant-accept Vorbis profile.
+    - 'turbo': Sped up in every plain audio viewer, normal in Roblox.  The
+      file is physically sped up *speed_factor* times (default 2x: pitch and
+      speed together, a pure resample), so Discord previews, browsers, media
+      players and the Roblox website all play it fast and chipmunked.  The
+      speed is real audio content, so Roblox's transcode keeps it - and in
+      game ONE property, Sound.PlaybackSpeed = 1/factor, is the exact
+      mathematical inverse: original speed and original pitch.  Bonus: the
+      file is *factor* times shorter, so a single 6:58 asset holds up to
+      6:58 x factor of real music (13:56 at 2x).  *seconds* caps the FILE
+      (sped) duration like the other single-asset methods.  Encoded in the
+      instant-accept Vorbis profile; treble ceiling in game is
+      22050/factor Hz (11 kHz at the 2x default).
     - 'bait': The decoy method.  LEFT channel carries a clean, innocent BAIT
       sound (an audio file of your choice via bait_path, looped to cover the
       song, or a generated soft chime); RIGHT channel carries the song with
@@ -975,6 +1014,114 @@ def craft(
             "mainPlayer:Play()",
         ]
         in_game_script = "\n".join(script_lines) + "\n"
+    elif method == METHOD_TURBO:
+        # Sped up in every plain audio viewer, normal in Roblox.  The audio
+        # is physically sped up *factor* times (speed and pitch together - a
+        # pure resample), so Discord previews, browsers, media players and
+        # the Roblox website all play it chipmunked.  The speed is real
+        # audio content, so Roblox's transcode keeps it - and in game ONE
+        # property, Sound.PlaybackSpeed = 1/factor, is the exact inverse
+        # resample: original speed AND pitch.  Bonus: the file is *factor*
+        # times shorter, so one 6:58 asset holds up to 6:58 x factor of
+        # real music.
+        factor = float(speed_factor) if speed_factor else TURBO_DEFAULT_FACTOR
+        if not (1.0 < factor <= TURBO_MAX_FACTOR):
+            raise ValueError(
+                f"turbo speed factor must be greater than 1.0 and at most "
+                f"{TURBO_MAX_FACTOR:g} (got {factor:g}); 2 = double speed"
+            )
+        relabel_rate = int(round(VORBIS_SAMPLE_RATE * factor))
+        effective = relabel_rate / VORBIS_SAMPLE_RATE
+        playback_speed = VORBIS_SAMPLE_RATE / relabel_rate
+
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)  # cap on the FILE length
+        real_cap = cap * effective
+        real_dur = full_dur
+        if full_dur > real_cap:
+            log(
+                f"[3/4] Turbo Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"trimming to {ogg_util.format_seconds(real_cap)} of real music "
+                f"(file cap {ogg_util.format_seconds(cap)} at {effective:.2f}x)."
+            )
+            real_dur = real_cap
+        log(
+            f"[3/4] Turbo Method: speeding the song up {effective:.2f}x - every "
+            f"plain audio viewer (Discord, browsers, media players, the Roblox "
+            f"website) plays it fast and pitched up; in game "
+            f"Sound.PlaybackSpeed = {playback_speed:.6g} restores the original "
+            f"speed and pitch..."
+        )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+        path = os.path.join(out_dir, f"{out_base}.ogg")
+        if os.path.normcase(path) == os.path.normcase(input_path):
+            path = os.path.join(out_dir, f"{out_base}_turbo.ogg")
+
+        filt = join_filters(turbo_filter(factor), pan_filter(pan_hz))
+        encoder = ffmpeg_util.convert_segment(
+            exe, input_path, path, fmt="vorbis",
+            duration=real_dur / effective,  # -t measures the sped (output) timeline
+            audio_filter=filt, log=log,
+        )
+        output_path = path
+        out_codec = "vorbis"
+        if os.path.getsize(path) > MAX_UPLOAD_BYTES:
+            raise RuntimeError(
+                "Turbo output exceeded the 20 MB upload limit "
+                "(should be impossible at 160 kbps / 6:58)"
+            )
+
+        # Verify the profile straight from the output's headers.
+        with open(path, "rb") as handle:
+            out_data = handle.read()
+        out_pages = ogg_util.parse_pages(out_data)
+        out_codec, out_rate = ogg_util.detect_codec(out_data, out_pages)
+        declared_seconds = ffmpeg_util.probe_duration(exe, path) or (real_dur / effective)
+        actual_seconds = real_dur
+        size_mb = os.path.getsize(path) / 1_000_000
+        log(
+            f"      Turbo: {ogg_util.format_seconds(real_dur)} of real music inside "
+            f"a {ogg_util.format_seconds(declared_seconds)} file ({effective:.2f}x) "
+            f"[{out_codec} {out_rate} Hz stereo | {size_mb:.2f} MB]"
+        )
+        log(
+            f"      In-game treble ceiling: ~{22050.0 / effective / 1000:.1f} kHz "
+            f"(the price of the {effective:.2f}x speedup)."
+        )
+        log(
+            "      Upload this ONE file, then in game set ONE property on a Sound: "
+            "PlaybackSpeed (script below).  Every preview hears chipmunk."
+        )
+        in_game_script = (
+            f"-- Turbo Method ({ogg_util.format_seconds(real_dur)} of real music "
+            f"in a {ogg_util.format_seconds(declared_seconds)} file, {effective:.2f}x)\n"
+            "-- THIS asset is intentionally sped up: every plain audio viewer\n"
+            "-- (Discord preview, browsers, media players, the Roblox website)\n"
+            "-- plays it fast and pitched up.  In game ONE property restores the\n"
+            "-- original speed AND pitch - no wiring, no equalizers, a plain Sound.\n"
+            "-- (The new AudioPlayer API has no speed control; the classic Sound\n"
+            "-- does.  You can even skip this script: insert a Sound and set\n"
+            "-- PlaybackSpeed in the Properties panel.)\n"
+            "--\n"
+            "-- IF IT PLAYS ON THE WEBSITE BUT NOT IN-GAME (asset shows 0:00):\n"
+            "-- That is Roblox's documented private-audio bug, NOT the file. Fix:\n"
+            "--   1) Studio -> Toolbox -> Inventory (Creator) -> find the audio -> Insert.\n"
+            "--      Do NOT paste the sound ID by hand - pasted IDs stay silent.\n"
+            "--   2) Or create.roblox.com -> your audio asset -> '...' menu ->\n"
+            "--      Asset Permissions -> add this experience to the allowed list.\n"
+            "-- Then:\n"
+            f"local sound = script.Parent\n"
+            f'sound.SoundId = "rbxassetid://0" -- your uploaded asset ID\n'
+            f"sound.PlaybackSpeed = {playback_speed:.6g} -- undoes the "
+            f"{effective:.2f}x speedup: normal speed + pitch\n"
+            f"sound.Volume = 1\n"
+            f"sound:Play()\n"
+        )
     elif method == METHOD_SINGLE:
         # ONE clean asset, original pitch and speed, no tricks.  Research
         # findings baked in:
