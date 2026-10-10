@@ -107,6 +107,7 @@ class CoolinApp(tk.Tk):
                      values=(
                          pipeline.METHOD_SINGLE,
                          pipeline.METHOD_CHUNKED,
+                         pipeline.METHOD_EQMASK,
                          pipeline.METHOD_MONOGATE,
                          pipeline.METHOD_INVERT,
                          pipeline.METHOD_SPEED,
@@ -169,7 +170,8 @@ class CoolinApp(tk.Tk):
     def _default_seconds_for_method(self, method: str) -> None:
         if method == pipeline.METHOD_CHUNKED:
             default = pipeline.DEFAULT_CHUNK_SECONDS
-        elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE):
+        elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
+                        pipeline.METHOD_EQMASK):
             default = pipeline.SINGLE_MAX_SECONDS
         else:
             default = pipeline.DEFAULT_FAKE_SECONDS

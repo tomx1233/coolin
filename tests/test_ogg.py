@@ -370,6 +370,49 @@ class OggCraftingTest(unittest.TestCase):
         self.assertIn("Instance.new(\"Sound\")", res.in_game_script)
         self.assertIn("sound.Parent = part", res.in_game_script)
 
+    def test_eqmask_method_cut_and_restore(self):
+        """EQMask: everything below ~4 kHz must be cut ~40 dB in the output
+        (preview hears only sizzle), and the proof file must restore it."""
+        out_path = os.path.join(self.tmpdir.name, "eq_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="eqmask",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+
+        # Mid-band level of the tone sweep (220-880 Hz fundamentals)...
+        mid_band = "highpass=f=300,lowpass=f=3000"
+        orig_mid = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", self.wav_path], mid_band)
+        out_mid = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], mid_band)
+        self.assertIsNotNone(orig_mid)
+        self.assertIsNotNone(out_mid)
+        # ...must be cut by roughly EQMASK_CUT_DB in the crafted asset.
+        self.assertGreater(orig_mid - out_mid, pipeline.EQMASK_CUT_DB - 8.0)
+        self.assertLess(orig_mid - out_mid, pipeline.EQMASK_CUT_DB + 8.0)
+
+        # The proof file (inverse EQ applied) must restore the mid band.
+        stem = os.path.splitext(res.output_path)[0]
+        test_path = stem + "_test_restored.wav"
+        self.assertTrue(os.path.isfile(test_path))
+        restored_mid = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", test_path], mid_band)
+        self.assertIsNotNone(restored_mid)
+        self.assertAlmostEqual(restored_mid, orig_mid, delta=4.0)
+
+        # Duration/limits and the in-game script contents.
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+        self.assertIn("AudioEqualizer", res.in_game_script)
+        self.assertIn("MidGain = 10", res.in_game_script)
+        self.assertIn("NumberRange.new(200, 4000)", res.in_game_script)
+        # The script chains EQMASK_LAYERS equalizers via a loop.
+        self.assertIn(f"LAYERS = {pipeline.EQMASK_LAYERS}", res.in_game_script)
+        self.assertIn("for i = 1, LAYERS do", res.in_game_script)
+
     def test_single_method_one_clean_asset(self):
         """Single method: ONE clean file at original pitch & speed - lossless
         FLAC when it fits, under the 7:00 limit and the 20 MB size limit."""

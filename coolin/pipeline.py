@@ -26,6 +26,7 @@ METHOD_MULTISTREAM = "multistream"
 METHOD_CHUNKED = "chunked"
 METHOD_SINGLE = "single"
 METHOD_MONOGATE = "monogate"
+METHOD_EQMASK = "eqmask"
 SUPPORTED_METHODS = (
     METHOD_INVERT,
     METHOD_SPEED,
@@ -34,7 +35,37 @@ SUPPORTED_METHODS = (
     METHOD_CHUNKED,
     METHOD_SINGLE,
     METHOD_MONOGATE,
+    METHOD_EQMASK,
 )
+
+# eqmask: how deeply the low+mid bands are cut at encode (dB).  Roblox's
+# AudioEqualizer boosts at most +10 dB per band per instance, so the in-game
+# restore chains EQMASK_LAYERS instances (4 x 10 dB = +40 dB).
+EQMASK_CUT_DB = 40.0
+EQMASK_LAYERS = 4
+# Band edges (Hz): everything below EQMASK_HIGH_HZ is cut; Roblox MidRange
+# crossovers bottom out at 200 Hz, so low/mid split at 200.
+EQMASK_LOW_HZ = 200.0
+EQMASK_HIGH_HZ = 4000.0
+# ffmpeg peaking filter that approximates the mid cut: centered geometrically
+# between 200 and 4000 Hz with a matching octave width.
+EQMASK_MID_CENTER_HZ = 894.0
+EQMASK_MID_WIDTH_OCT = 4.32
+
+
+def eqmask_filters() -> "tuple[str, str]":
+    """Return (cut_filter, restore_filter) for the eqmask method."""
+    cut = (
+        f"lowshelf=f={int(EQMASK_LOW_HZ)}:gain=-{EQMASK_CUT_DB:.0f},"
+        f"equalizer=f={EQMASK_MID_CENTER_HZ:.0f}:width_type=o:"
+        f"width={EQMASK_MID_WIDTH_OCT}:gain=-{EQMASK_CUT_DB:.0f}"
+    )
+    restore = (
+        f"lowshelf=f={int(EQMASK_LOW_HZ)}:gain={EQMASK_CUT_DB:.0f},"
+        f"equalizer=f={EQMASK_MID_CENTER_HZ:.0f}:width_type=o:"
+        f"width={EQMASK_MID_WIDTH_OCT}:gain={EQMASK_CUT_DB:.0f}"
+    )
+    return cut, restore
 
 # Default per-chunk length for the chunked method.  Roblox's import limit is
 # "less than 7 minutes" per asset, so 6:59 chunks = the fewest uploads.
@@ -211,6 +242,18 @@ def craft(
       leaving only the music.  mask_depth (default 18 dB) trades masking
       strength against in-game loudness.  FLAC when it fits 20 MB, else
       320 kbps MP3; same 6:58 cap as 'single'.
+      CAVEAT: relies on Roblox's 3D mono downmix actually SUMMING channels -
+      newer engine versions keep 3D sounds directional/stereo, which breaks
+      this.  Use 'eqmask' instead: it does not depend on channel handling.
+    - 'eqmask': Spectral mask - the robust replacement for 'monogate'.  At
+      encode time everything below ~4 kHz is cut by 40 dB, so the preview /
+      moderation hears only faint >4 kHz sizzle (no vocals, no melody -
+      unrecognizable).  In game, the generated script chains AudioEqualizer
+      instances (LowGain=MidGain=+10, MidRange 200-4000) to boost the cut
+      bands back +40 dB, restoring the song.  Purely linear and independent
+      of channel handling: works for 2D, 3D, mono, stereo, left-only and
+      volumetric playback alike.  FLAC when it fits 20 MB, else 320 kbps MP3;
+      same 6:58 cap as 'single'.
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -704,6 +747,144 @@ def craft(
             f"sound.Parent = part\n"
             f"sound:Play()\n"
         )
+    elif method == METHOD_EQMASK:
+        # Spectral mask: cut everything below ~4 kHz by 40 dB at encode time.
+        # The preview/moderation only hears faint >4 kHz sizzle (unrecognizable);
+        # the generated in-game script restores the cut bands with chained
+        # AudioEqualizers (+10 dB per band per layer).  Channel-independent:
+        # works for 2D, 3D, mono, stereo, left-only and volumetric playback.
+        cut_filter, restore_filter = eqmask_filters()
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)
+        encode_dur = full_dur
+        if full_dur > cap:
+            log(
+                f"[3/4] EQMask Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"trimming to {ogg_util.format_seconds(cap)} (single-asset platform limit; "
+                f"use -m chunked to keep the whole song)."
+            )
+            encode_dur = cap
+        else:
+            log(
+                f"[3/4] EQMask Method: cutting everything below "
+                f"{int(EQMASK_HIGH_HZ)} Hz by {EQMASK_CUT_DB:.0f} dB "
+                f"(preview hears only faint high-frequency sizzle; the song is "
+                f"restored in game by the generated AudioEqualizer chain)..."
+            )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+
+        encoder = ""
+        chosen_path = None
+        last_error: Exception | None = None
+        for fmt in SINGLE_FORMATS:
+            path = os.path.join(out_dir, f"{out_base}.{fmt}")
+            if os.path.normcase(path) == os.path.normcase(input_path):
+                path = os.path.join(out_dir, f"{out_base}_eq.{fmt}")
+            try:
+                encoder = ffmpeg_util.convert_segment(
+                    exe, input_path, path, fmt=fmt, duration=encode_dur,
+                    audio_filter=cut_filter, log=log,
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+            if os.path.getsize(path) <= MAX_UPLOAD_BYTES:
+                chosen_path = path
+                break
+            try:
+                os.remove(path)  # too big; next rung
+            except OSError:
+                pass
+        if chosen_path is None:
+            raise RuntimeError(
+                f"Could not encode the song under the 20 MB upload limit: {last_error}"
+            )
+
+        # Proof file: apply the inverse EQ locally so the user can hear what
+        # the in-game equalizer chain will (approximately) sound like.
+        test_path = os.path.join(out_dir, f"{out_base}_test_restored.wav")
+        try:
+            ffmpeg_util.convert_segment(
+                exe, chosen_path, test_path, fmt="wav",
+                duration=min(10.0, encode_dur),
+                audio_filter=restore_filter,
+                log=lambda _: None,
+            )
+        except RuntimeError:
+            test_path = ""
+
+        output_path = chosen_path
+        out_codec = "flac" if chosen_path.endswith(".flac") else "mp3"
+        declared_seconds = ffmpeg_util.probe_duration(exe, chosen_path) or encode_dur
+        actual_seconds = declared_seconds
+        size_mb = os.path.getsize(chosen_path) / 1_000_000
+        log(
+            f"      Wrote {chosen_path} [{out_codec.upper()} | "
+            f"{ogg_util.format_seconds(declared_seconds)} | {size_mb:.2f} MB]"
+        )
+        if test_path:
+            log(
+                f"      Proof file: {test_path}  <- play this: it is (approximately) what "
+                f"your game hears after the EQ restore.  Play "
+                f"{os.path.basename(chosen_path)} normally to hear what the "
+                f"Roblox preview hears (faint sizzle only)."
+            )
+        log(
+            "      In game, use the generated AudioEqualizer chain script below "
+            "(new Audio API).  Works with 2D or 3D playback - channel handling "
+            "does not matter for this method."
+        )
+
+        layers = EQMASK_LAYERS
+        script_lines = [
+            "-- Coolin EQMask Song Player (generated)",
+            f"-- The asset has everything below {int(EQMASK_HIGH_HZ)} Hz cut by "
+            f"{EQMASK_CUT_DB:.0f} dB: the Roblox preview only hears faint sizzle.",
+            f"-- {layers} chained AudioEqualizers boost the cut bands back "
+            f"+{EQMASK_CUT_DB:.0f} dB, restoring the song in game.",
+            "-- 1) Upload the output file and put its asset ID below.",
+            "-- 2) Put this Script anywhere (SoundService or a Part - 2D/3D both work).",
+            "",
+            'local ASSET_ID = "rbxassetid://0" -- your uploaded asset ID',
+            f"local LAYERS = {layers}           -- equalizer layers x (+10 dB each) = +{EQMASK_CUT_DB:.0f} dB restore",
+            "local VOLUME = 0.5          -- raise/lower to taste",
+            "",
+            'local player = Instance.new("AudioPlayer")',
+            "player.AssetId = ASSET_ID",
+            "player.Volume = VOLUME",
+            "player.Parent = script",
+            "",
+            "local function wireUp(source, target)",
+            '\tlocal wire = Instance.new("Wire")',
+            "\twire.SourceInstance = source",
+            "\twire.TargetInstance = target",
+            "\twire.Parent = target",
+            "\treturn wire",
+            "end",
+            "",
+            "local prev = player",
+            f"for i = 1, LAYERS do",
+            '\tlocal eq = Instance.new("AudioEqualizer")',
+            f"\teq.MidRange = NumberRange.new({int(EQMASK_LOW_HZ)}, {int(EQMASK_HIGH_HZ)})",
+            f"\teq.MidGain = 10   -- max per instance; LAYERS of these reach +{EQMASK_CUT_DB:.0f} dB",
+            "\teq.LowGain = 10",
+            "\teq.Parent = script",
+            "\twireUp(prev, eq)",
+            "\tprev = eq",
+            "end",
+            "",
+            'local output = Instance.new("AudioDeviceOutput")',
+            "output.Parent = script",
+            "wireUp(prev, output)",
+            "",
+            "player:Play()",
+        ]
+        in_game_script = "\n".join(script_lines) + "\n"
     else:  # METHOD_MULTISTREAM
         if target_seconds >= song_max:
             log(

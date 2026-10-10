@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("single", "chunked", "monogate", "invert", "speed", "invert_speed", "multistream"),
+        choices=("single", "chunked", "eqmask", "monogate", "invert", "speed", "invert_speed", "multistream"),
         default=pipeline.METHOD_SINGLE,
         help=(
             "conversion method: 'single' (ONE clean asset at original pitch & speed - lossless "
@@ -54,9 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
             "into lossless upload-safe chunk files and generates an in-game Script that plays "
             "them as one continuous song at original quality), "
             "'invert' (phase inversion: cancels to silence in mono/preview, plays in-game), "
-            "'monogate' (masked in STEREO - the web preview/moderation hears only pink noise - "
-            "but clean in-game because Roblox 3D sounds play as MONO and the anti-correlated "
-            "noise cancels in the L+R sum), "
+            "'eqmask' (RECOMMENDED for hiding: everything below 4 kHz is cut 40 dB, so the "
+            "preview hears only faint sizzle - in game a chained AudioEqualizer script restores "
+            "the song; works for any channel handling, unlike monogate), "
+            "'monogate' (masked in STEREO via anti-correlated noise; relies on Roblox's 3D "
+            "mono downmix summing channels, which newer engine versions may not do - prefer "
+            "'eqmask'), "
             "'speed' (playback speed invert: short physical file, plays full song in-game via "
             "Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' (chained OGG for the "
             "Discord preview trick). Default: single"
@@ -115,7 +118,8 @@ def main(argv=None) -> int:
         if args.seconds is None:
             if args.method == pipeline.METHOD_CHUNKED:
                 raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
-            elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE):
+            elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
+                                 pipeline.METHOD_EQMASK):
                 raw_seconds = pipeline.SINGLE_MAX_SECONDS
             else:
                 raw_seconds = pipeline.DEFAULT_FAKE_SECONDS
