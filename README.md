@@ -29,26 +29,46 @@ python coolin_cli.py song.mp3            :: default method is vorbis
 python coolin_cli.py song.mp3 -m vorbis  :: same, explicit
 ```
 
+### The `audiocode` method — a code embedded IN the audio file that plays different files in-game
+
+Audio can't execute scripts, but it can *carry data* — and the new Audio API can read it back in real time. `audiocode` embeds a command stream inside the audio file itself:
+
+```
+RIGHT channel = the music (normal, full-band)
+LEFT  channel = near-silence + short quiet marker tones at your cue times
+                (one frequency per command: file 2 → 1500 Hz, file 3 → 1750 Hz, …)
+```
+
+The generated **LocalScript** (client-side — audio analysis is disabled on the server) wires the asset's left channel into an `AudioAnalyzer`, reads `GetSpectrum()` every frame, and the moment a marker frequency appears it switches the audible `AudioPlayer` to the corresponding file in `PLAYLIST`. Because the tones are *audible content*, they **survive Roblox's transcode** — the code genuinely travels with the uploaded file, and the same generic script plays any coded asset.
+
+```bat
+:: at 30s switch to file 2, at 90s to file 3, at 150s back to the coded file's music
+python coolin_cli.py song.mp3 -m audiocode --cue 30:2 --cue 90:3 --cue 150:1
+```
+
+Workflow: convert → upload this file **and** the other audio files → paste all their asset IDs into `PLAYLIST` in the generated script → put the LocalScript in SoundService. Notes: the preview hears the music in the right ear with faint ticks (the markers) in the left — that's the code; up to 16 files per coded asset; encoded in the instant-accept Vorbis profile.
+
 ## Every known method, compared
 
 | # | Method | Quality | Beats duration limit? | Notes |
 |---|---|---|---|---|
 | 1 | **`vorbis` — the gtiiii.ogg instant-accept profile** ⭐ (default) | ~160 kbps Vorbis | ✅ up to 6:58 | Replicates the field-tested file: plain Ogg Vorbis 44.1 kHz stereo, nominal 160 kbps, metadata stripped — the format Roblox's audio engine natively speaks. Uploads are accepted immediately. Script includes the official fixes for the *plays-on-web-but-not-in-game* bug. |
-| 2 | **`single` — one clean lossless asset** | **Original (lossless FLAC)** | ✅ up to 6:58 | One asset, original pitch & speed, no tricks. FLAC → 320k MP3 fallback; 6:58 cap dodges the near-limit upload bug. |
-| 3 | **`chunked` — lossless chunk split + in-game playlist** | **Original (lossless source)** | ✅ Any song length | Each chunk is a *genuinely* valid short file — nothing to detect. Roblox's own transcode is the only lossy step. Use this for songs longer than 6:58. |
-| 4 | **`eqmask` — spectral mask + in-game EQ restore** ⭐ (for hiding) | Original (restored in-game) | ✅ up to 6:58 | **The robust hiding method.** Everything below 4 kHz is cut 40 dB at encode → the preview/moderation hears only faint sizzle (no vocals, no melody). The generated script chains 4 `AudioEqualizer`s (+10 dB Low+Mid each) to restore the song in-game. Channel-independent — works for 2D, 3D, mono, stereo, left-only, volumetric. |
-| 5 | **`bait` — decoy channel + in-game channel-select** ⭐ (decoy) | Original (restored in-game) | ✅ up to 6:58 | **Plays a bait in the preview, the song in game.** LEFT channel = a clean bait (your own file via `--bait`, or a generated soft chime); RIGHT channel = the spectrally masked song. The generated script selects only the RIGHT channel (`AudioChannelSplitter` → `AudioChannelMixer` → EQ chain). Deterministic — no reliance on legacy 3D downmix behavior. |
-| 6 | **`monogate` — masked in stereo, clean in mono** | Original (in-game) | ✅ up to 6:58 | The **inverse of phase-inversion**: `L = music + noise, R = music − noise`. The stereo web preview/moderation hears only pink noise (music masked ~18 dB beneath); in-game 3D sounds play as **mono** (L+R), cancelling the noise → clean music. Sound must be parented to a Part/Attachment. **Unreliable: newer engines keep 3D sounds directional/stereo — prefer `eqmask`.** |
-| 7 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
-| 8 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
-| 9 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
-| 10 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
-| 11 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
-| 12 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
-| 13 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
-| 14 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
-| 15 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
-| 16 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
+| 2 | **`audiocode` — a code embedded in the audio that plays different files in-game** | Original + code | ✅ up to 6:58 | Marker tones on the LEFT channel (music on the RIGHT) form an embedded command stream. The generated LocalScript decodes them via `AudioAnalyzer:GetSpectrum()` and switches between the files in a `PLAYLIST` at exactly the coded moments. The code travels *inside* the audio file and survives Roblox's transcode. |
+| 3 | **`single` — one clean lossless asset** | **Original (lossless FLAC)** | ✅ up to 6:58 | One asset, original pitch & speed, no tricks. FLAC → 320k MP3 fallback; 6:58 cap dodges the near-limit upload bug. |
+| 4 | **`chunked` — lossless chunk split + in-game playlist** | **Original (lossless source)** | ✅ Any song length | Each chunk is a *genuinely* valid short file — nothing to detect. Roblox's own transcode is the only lossy step. Use this for songs longer than 6:58. |
+| 5 | **`eqmask` — spectral mask + in-game EQ restore** ⭐ (for hiding) | Original (restored in-game) | ✅ up to 6:58 | **The robust hiding method.** Everything below 4 kHz is cut 40 dB at encode → the preview/moderation hears only faint sizzle (no vocals, no melody). The generated script chains 4 `AudioEqualizer`s (+10 dB Low+Mid each) to restore the song in-game. Channel-independent — works for 2D, 3D, mono, stereo, left-only, volumetric. |
+| 6 | **`bait` — decoy channel + in-game channel-select** ⭐ (decoy) | Original (restored in-game) | ✅ up to 6:58 | **Plays a bait in the preview, the song in game.** LEFT channel = a clean bait (your own file via `--bait`, or a generated soft chime); RIGHT channel = the spectrally masked song. The generated script selects only the RIGHT channel (`AudioChannelSplitter` → `AudioChannelMixer` → EQ chain). Deterministic — no reliance on legacy 3D downmix behavior. |
+| 7 | **`monogate` — masked in stereo, clean in mono** | Original (in-game) | ✅ up to 6:58 | The **inverse of phase-inversion**: `L = music + noise, R = music − noise`. The stereo web preview/moderation hears only pink noise (music masked ~18 dB beneath); in-game 3D sounds play as **mono** (L+R), cancelling the noise → clean music. Sound must be parented to a Part/Attachment. **Unreliable: newer engines keep 3D sounds directional/stereo — prefer `eqmask`.** |
+| 8 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
+| 9 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
+| 10 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
+| 11 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
+| 12 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
+| 13 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
+| 14 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
+| 15 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
+| 16 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
+| 17 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
 
 ## The `chunked` method (default) — how it gets closest to the original
 

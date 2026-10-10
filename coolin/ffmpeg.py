@@ -292,6 +292,47 @@ def convert_bait(
     return codec
 
 
+def convert_coded(
+    exe: str,
+    input_path: str,
+    output_path: str,
+    marker_wav: str,
+    duration: Optional[float] = None,
+    log=print,
+) -> str:
+    """Encode a 'coded' asset: LEFT channel = marker tones (the embedded code,
+    from *marker_wav*), RIGHT channel = the music.  Encoded in the instant-
+    accept Vorbis profile (44.1 kHz stereo ~160 kbps, no metadata).
+
+    The in-game AudioCode script decodes the markers with an AudioAnalyzer
+    wired to the LEFT channel and switches between audio files at the coded
+    moments - the code travels inside the audio file itself and survives
+    Roblox's transcode because it is audible content.
+    """
+    graph = (
+        "[0:a]aresample=44100,aformat=channel_layouts=stereo,"
+        "pan=mono|c0=0.5*c0+0.5*c1[mus];"
+        "[1:a]aresample=44100,aformat=channel_layouts=mono[mark];"
+        "[mark][mus]join=inputs=2:channel_layout=stereo[out]"
+    )
+    duration_args = ["-t", str(duration)] if duration is not None else []
+    cmd = (
+        [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+        + ["-i", input_path, "-i", marker_wav]
+        + ["-filter_complex", graph, "-map", "[out]"]
+        + duration_args
+        + ["-c:a", "libvorbis", "-q:a", "5", "-ar", "44100", "-ac", "2",
+           "-map_metadata", "-1", "-f", "ogg", output_path]
+    )
+    log(f"ffmpeg: {' '.join(_quote(arg) for arg in cmd)}")
+    result = _run(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg failed to convert the input file:\n" + result.stderr.strip()
+        )
+    return "libvorbis"
+
+
 def probe_mean_volume(exe: str, input_args: Sequence[str], audio_filter: str) -> Optional[float]:
     """Mean (RMS) volume in dB of an input (file or lavfi source) after
     applying *audio_filter*.  Returns None if volumedetect reports nothing."""

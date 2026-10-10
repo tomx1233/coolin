@@ -66,6 +66,35 @@ def make_long_wav(path: str, seconds: float = 425.0, rate: int = 8000) -> None:
             handle.writeframes(bytes(chunk))
 
 
+def goertzel_power(samples: "list[int]", freq: float, rate: int) -> float:
+    """Goertzel algorithm: power of *freq* in the sample window (mirrors the
+    in-game AudioAnalyzer.GetSpectrum bin detection)."""
+    import math
+    n = len(samples)
+    k = 2.0 * math.pi * freq / rate
+    coeff = 2.0 * math.cos(k)
+    s1 = s2 = 0.0
+    for x in samples:
+        s0 = x + coeff * s1 - s2
+        s2, s1 = s1, s0
+    return s1 * s1 + s2 * s2 - coeff * s1 * s2
+
+
+def decode_channel_pcm(exe: str, path: str, channel: int) -> "tuple[list[int], int]":
+    """Decode one channel of *path* to 44.1 kHz mono s16 PCM samples."""
+    import subprocess as sp
+    result = sp.run(
+        [exe, "-hide_banner", "-loglevel", "error", "-i", path,
+         "-vn", "-ar", "44100", "-ac", "1",
+         "-af", f"pan=mono|c0=c{channel}", "-f", "s16le", "-"],
+        stdout=sp.PIPE, stderr=sp.PIPE)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace"))
+    raw = result.stdout
+    samples = list(struct.unpack(f"<{len(raw)//2}h", raw[: len(raw)//2*2]))
+    return samples, 44100
+
+
 class OggCraftingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -537,6 +566,86 @@ class OggCraftingTest(unittest.TestCase):
         self.assertIn("Asset Permissions", res.in_game_script)
         self.assertIn("sound:Play()", res.in_game_script)
         self.assertNotIn("PlaybackSpeed", res.in_game_script)
+
+    def test_audiocode_embeds_decodable_markers(self):
+        """AudioCode: LEFT channel carries a tone at f(cmd) at each cue time
+        (and nowhere else); RIGHT channel is the clean full music; the
+        generated script decodes via AudioAnalyzer and switches files."""
+        out_path = os.path.join(self.tmpdir.name, "code_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        cues = [(1.0, 2), (3.0, 3)]
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="audiocode",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             cues=cues, log=lambda _: None)
+        self.assertTrue(res.output_path.endswith(".ogg"))
+
+        left, rate = decode_channel_pcm(self.ffmpeg, res.output_path, 0)
+
+        def tone_power(t: float, freq: float, dur: float = 0.18) -> float:
+            start = int(t * rate)
+            return goertzel_power(left[start:start + int(dur * rate)], freq, rate)
+
+        f2 = pipeline.audiocode_freq(2)   # 1500 Hz
+        f3 = pipeline.audiocode_freq(3)   # 1750 Hz
+        # Cue 1: the file-2 tone dominates at t=1.0 on the LEFT channel
+        # (spectral detection, exactly like the in-game GetSpectrum decoder).
+        self.assertGreater(tone_power(1.0, f2) / max(tone_power(1.0, f3), 1e-9), 100.0)
+        # Cue 2: the file-3 tone dominates at t=3.0.
+        self.assertGreater(tone_power(3.0, f3) / max(tone_power(3.0, f2), 1e-9), 100.0)
+        # No stray tones between cues or before the first cue.
+        for t in (2.0, 0.5):
+            self.assertLess(tone_power(t, f2), 1e-3 * tone_power(1.0, f2))
+            self.assertLess(tone_power(t, f3), 1e-3 * tone_power(3.0, f3))
+
+        # RIGHT channel = clean, full-level music (not tones).
+        music_R = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path],
+            "atrim=0:2,pan=mono|c0=c1,highpass=f=300,lowpass=f=3000")
+        orig_mid = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", self.wav_path], "highpass=f=300,lowpass=f=3000")
+        self.assertAlmostEqual(music_R, orig_mid, delta=3.0)
+
+        # Duration/limits: full song in the instant-accept profile.
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+        data = self._read(res.output_path)
+        rep = ogg_util.describe(data)
+        self.assertEqual(rep["codec"], "vorbis")
+        self.assertEqual(rep["chained_streams"], 1)
+        self.assertTrue(rep["all_crcs_valid"])
+
+        # The generated script: analyzer decode + playlist switching.
+        self.assertIn("AudioAnalyzer", res.in_game_script)
+        self.assertIn("GetSpectrum", res.in_game_script)
+        self.assertIn("SpectrumEnabled = true", res.in_game_script)
+        self.assertIn("PLAYLIST", res.in_game_script)
+        self.assertIn("switchTo", res.in_game_script)
+        self.assertIn("LocalScript", res.in_game_script)
+        self.assertIn('"Left")', res.in_game_script)  # analyzer taps left channel
+
+    def test_audiocode_cue_validation(self):
+        """Bad cue timelines must be rejected with a clear error."""
+        os.makedirs(os.path.join(self.tmpdir.name, "code_out"), exist_ok=True)
+        out_path = os.path.join(self.tmpdir.name, "code_out", "tone.ogg")
+        with self.assertRaises(ValueError):
+            pipeline.craft(self.wav_path, output_path=out_path, method="audiocode",
+                           fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                           cues="not-a-cue", log=lambda _: None)
+        with self.assertRaises(ValueError):
+            pipeline.craft(self.wav_path, output_path=out_path, method="audiocode",
+                           fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                           cues="1.0:99", log=lambda _: None)
+        with self.assertRaises(ValueError):
+            # cue past the end of the (6s) song
+            pipeline.craft(self.wav_path, output_path=out_path, method="audiocode",
+                           fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                           cues="9.0:2", log=lambda _: None)
+        # parse_cues accepts tuples, strings, spaces
+        self.assertEqual(pipeline.parse_cues("1:2, 3:3"), [(1.0, 2), (3.0, 3)])
+        self.assertEqual(pipeline.parse_cues([(1.0, 2)]), [(1.0, 2)])
+        self.assertEqual(pipeline.parse_cues(None), [])
 
     def test_single_method_one_clean_asset(self):
         """Single method: ONE clean file at original pitch & speed - lossless

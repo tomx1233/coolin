@@ -29,8 +29,10 @@ METHOD_MONOGATE = "monogate"
 METHOD_EQMASK = "eqmask"
 METHOD_BAIT = "bait"
 METHOD_VORBIS = "vorbis"
+METHOD_AUDIOCODE = "audiocode"
 SUPPORTED_METHODS = (
     METHOD_VORBIS,
+    METHOD_AUDIOCODE,
     METHOD_INVERT,
     METHOD_SPEED,
     METHOD_INVERT_SPEED,
@@ -41,6 +43,92 @@ SUPPORTED_METHODS = (
     METHOD_EQMASK,
     METHOD_BAIT,
 )
+
+# AudioCode protocol: marker tone frequencies (Hz) for command index 1..16.
+# Command n means "switch to PLAYLIST[n]" (index 1 = the coded file itself).
+AUDIOCODE_BASE_HZ = 1000.0
+AUDIOCODE_STEP_HZ = 250.0
+AUDIOCODE_TONE_SECONDS = 0.18
+AUDIOCODE_AMPLITUDE = 0.25
+AUDIOCODE_MAX_COMMANDS = 16
+
+
+def audiocode_freq(command: int) -> float:
+    """Marker tone frequency for a command index (1..16)."""
+    return AUDIOCODE_BASE_HZ + AUDIOCODE_STEP_HZ * command
+
+
+def parse_cues(raw: "str | list | None") -> "list[tuple[float, int]]":
+    """Parse a cue timeline into (time_seconds, command_index) pairs.
+
+    Accepts 'T:N,T:N,...' strings (spaces allowed) or an iterable of
+    'T:N' strings / (time, index) tuples.  Command 1 = 'switch back to the
+    coded file'; 2..16 = the other files in the generated PLAYLIST.
+    """
+    if not raw:
+        return []
+    items: list = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    cues: "list[tuple[float, int]]" = []
+    for item in items:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            t, idx = float(item[0]), int(item[1])
+        else:
+            part = str(item).strip()
+            if not part:
+                continue
+            if ":" in part:
+                t_str, idx_str = part.rsplit(":", 1)
+            elif "=" in part:
+                t_str, idx_str = part.rsplit("=", 1)
+            else:
+                raise ValueError(f"Invalid cue {part!r} - expected 'time:file'")
+            t, idx = float(t_str), int(idx_str)
+        if t < 0:
+            raise ValueError(f"Cue time must be >= 0, got {t}")
+        if not (1 <= idx <= AUDIOCODE_MAX_COMMANDS):
+            raise ValueError(
+                f"Cue file index must be 1..{AUDIOCODE_MAX_COMMANDS}, got {idx}"
+            )
+        cues.append((t, idx))
+    cues.sort()
+    return cues
+
+
+def write_marker_wav(path: str, total_seconds: float,
+                     cues: "list[tuple[float, int]]", rate: int = 44100) -> int:
+    """Write the LEFT-channel marker track: near-silence with a short tone
+    burst at each cue time (frequency = audiocode_freq(command))."""
+    import math as _math
+    import wave as _wave
+    total_samples = int((total_seconds + 0.5) * rate)
+    buf = bytearray(total_samples * 2)  # 16-bit mono, starts silent
+
+    def add_sample(pos: int, value: float) -> None:
+        if 0 <= pos < total_samples:
+            buf[pos * 2] = int(value) & 0xFF
+            buf[pos * 2 + 1] = (int(value) >> 8) & 0xFF
+
+    fade = int(0.020 * rate)  # 20 ms cosine fade
+    tone_samples = int(AUDIOCODE_TONE_SECONDS * rate)
+    for t, command in cues:
+        start = int(t * rate)
+        omega = 2.0 * _math.pi * audiocode_freq(command) / rate
+        for i in range(tone_samples):
+            env = 1.0
+            if i < fade:
+                env = 0.5 - 0.5 * _math.cos(_math.pi * i / fade)
+            elif i > tone_samples - fade:
+                env = 0.5 - 0.5 * _math.cos(_math.pi * (tone_samples - i) / fade)
+            sample = AUDIOCODE_AMPLITUDE * env * _math.sin(omega * i)
+            add_sample(start + i, sample * 32767.0)
+
+    with _wave.open(path, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(bytes(buf))
+    return total_samples
+
 
 # The gtiiii.ogg field-tested profile (see README): plain Ogg Vorbis,
 # 44.1 kHz stereo, ~160 kbps (nominal 160000 in the Vorbis ID header),
@@ -225,6 +313,7 @@ def craft(
     mask_depth: float = 18.0,
     bait_path: Optional[str] = None,
     pan_hz: Optional[float] = None,
+    cues: Optional[list] = None,
     log: Callable[[str], None] = print,
     *,
     duration_seconds: Optional[float] = None,
@@ -280,6 +369,16 @@ def craft(
       'plays on the website but not in-game' private-audio bug (insert from
       Toolbox -> Inventory instead of pasting the ID, or grant the experience
       asset permissions).
+    - 'audiocode': Embeds a CODE inside the audio file that makes the game
+      play different files at the coded moments.  The RIGHT channel carries
+      the music; the LEFT channel carries quiet marker tones (one frequency
+      per command, from the *cues* timeline like '12.5:2,45:3').  The
+      generated LocalScript wires the left channel into an AudioAnalyzer,
+      decodes the markers from GetSpectrum(), and switches between the audio
+      files in a PLAYLIST at exactly the coded times.  The code travels
+      inside the audio file (it survives Roblox's transcode - it is audible
+      content) and the same generic script plays any coded asset.  Encoded
+      in the instant-accept Vorbis profile.
     - 'bait': The decoy method.  LEFT channel carries a clean, innocent BAIT
       sound (an audio file of your choice via bait_path, looped to cover the
       song, or a generated soft chime); RIGHT channel carries the song with
@@ -690,6 +789,192 @@ def craft(
             f"sound.Volume = 1\n"
             f"sound:Play()\n"
         )
+    elif method == METHOD_AUDIOCODE:
+        # A code embedded IN the audio file that makes the game play
+        # different files at the coded moments.  LEFT channel = quiet marker
+        # tones (one frequency per command), RIGHT channel = the music.
+        # The generated LocalScript decodes the markers via AudioAnalyzer
+        # (GetSpectrum) and switches the audible AudioPlayer at cue times.
+        cue_list = parse_cues(cues)
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)
+        encode_dur = full_dur
+        if full_dur > cap:
+            log(
+                f"[3/4] AudioCode Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"trimming to {ogg_util.format_seconds(cap)} (single-asset platform limit)."
+            )
+            encode_dur = cap
+        if not cue_list:
+            raise ValueError(
+                "audiocode needs a cue timeline, e.g. cues='12.5:2,45:3' "
+                "(at 12.5s switch to playlist file 2, at 45s to file 3)"
+            )
+        max_idx = max(idx for _, idx in cue_list)
+        for t, idx in cue_list:
+            if t >= encode_dur - 0.05:
+                raise ValueError(
+                    f"Cue at {t:.2f}s is past the encoded duration "
+                    f"({encode_dur:.2f}s)"
+                )
+        log(
+            f"[3/4] AudioCode Method: embedding {len(cue_list)} marker tone(s) on the "
+            f"LEFT channel (RIGHT = music). Cues: "
+            + ", ".join(f"{t:g}s->file {idx}" for t, idx in cue_list)
+            + "..."
+        )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+        path = os.path.join(out_dir, f"{out_base}.ogg")
+        if os.path.normcase(path) == os.path.normcase(input_path):
+            path = os.path.join(out_dir, f"{out_base}_coded.ogg")
+
+        fd_m, marker_wav = tempfile.mkstemp(suffix=".markers.wav")
+        os.close(fd_m)
+        try:
+            write_marker_wav(marker_wav, encode_dur, cue_list)
+            encoder = ffmpeg_util.convert_coded(
+                exe, input_path, path, marker_wav, duration=encode_dur, log=log,
+            )
+        finally:
+            try:
+                os.remove(marker_wav)
+            except OSError:
+                pass
+        if os.path.getsize(path) > MAX_UPLOAD_BYTES:
+            raise RuntimeError("Coded output exceeded the 20 MB upload limit")
+        output_path = path
+        out_codec = "vorbis"
+
+        declared_seconds = ffmpeg_util.probe_duration(exe, path) or encode_dur
+        actual_seconds = declared_seconds
+        size_mb = os.path.getsize(path) / 1_000_000
+        log(
+            f"      Wrote {path} [vorbis 44100 Hz stereo | "
+            f"{ogg_util.format_seconds(declared_seconds)} | {size_mb:.2f} MB]"
+        )
+        log(
+            "      Upload this file AND the other audio files, then paste their "
+            "IDs into PLAYLIST in the script below.  The switching code is "
+            "embedded in THIS file - the same generic script plays any coded asset."
+        )
+
+        freq_table = ", ".join(
+            f"[{idx}] = {audiocode_freq(idx):.0f}" for _, idx in sorted(set(cue_list))
+        )
+        playlist_lines = ['[1] = "MAIN", -- this coded file\'s own music']
+        for idx in range(2, max_idx + 1):
+            playlist_lines.append(f'[{idx}] = "rbxassetid://0", -- your uploaded file {idx}')
+        script_lines = [
+            "-- Coolin AudioCode Player (generated)",
+            "-- THIS audio file carries an embedded code: quiet marker tones on its",
+            "-- LEFT channel (RIGHT channel = the music).  This generic script decodes",
+            "-- the markers and switches between audio files at the coded moments.",
+            "-- IMPORTANT: run on the CLIENT - LocalScript, or Script with",
+            "-- RunContext = Client (audio analysis is disabled on the server).",
+            "",
+            "local PLAYLIST = {",
+            *("\t" + line for line in playlist_lines),
+            "}",
+            "local THRESHOLD = 0.02  -- marker detection sensitivity",
+            "",
+            'local RunService = game:GetService("RunService")',
+            "",
+            "local function wireUp(source, target, sourceName)",
+            '\tlocal wire = Instance.new("Wire")',
+            "\twire.SourceInstance = source",
+            "\twire.TargetInstance = target",
+            "\tif sourceName then wire.SourceName = sourceName end",
+            "\twire.Parent = target",
+            "\treturn wire",
+            "end",
+            "",
+            'local output = Instance.new("AudioDeviceOutput")',
+            "output.Parent = script",
+            'local mixer = Instance.new("AudioChannelMixer")',
+            "mixer.Layout = Enum.AudioChannelLayout.Stereo",
+            "mixer.Parent = script",
+            "wireUp(mixer, output)",
+            "",
+            "-- The coded asset: music (RIGHT) -> speakers; markers (LEFT) -> analyzer.",
+            'local mainPlayer = Instance.new("AudioPlayer")',
+            'mainPlayer.AssetId = "rbxassetid://0" -- THIS asset\'s ID',
+            "mainPlayer.Volume = 1",
+            "mainPlayer.Parent = script",
+            'local splitter = Instance.new("AudioChannelSplitter")',
+            "splitter.Layout = Enum.AudioChannelLayout.Stereo",
+            "splitter.Parent = script",
+            "wireUp(mainPlayer, splitter)",
+            'local mainFader = Instance.new("AudioFader")',
+            "mainFader.Volume = 1",
+            "mainFader.Parent = script",
+            'wireUp(splitter, mainFader, "Right")',
+            'wireUp(mainFader, mixer, nil, "Left")',
+            'wireUp(mainFader, mixer, nil, "Right")',
+            "",
+            'local analyzer = Instance.new("AudioAnalyzer")',
+            "analyzer.SpectrumEnabled = true",
+            "analyzer.Parent = script",
+            'wireUp(splitter, analyzer, "Left")',
+            "",
+            "-- One player + fader per extra playlist entry.",
+            "local players, faders = {}, {}",
+            "for i = 2, #PLAYLIST do",
+            '\tlocal p = Instance.new("AudioPlayer")',
+            "\tp.AssetId = PLAYLIST[i]",
+            "\tp.Volume = 1",
+            "\tp.Parent = script",
+            '\tlocal f = Instance.new("AudioFader")',
+            "\tf.Volume = 0",
+            "\tf.Parent = script",
+            "\twireUp(p, f)",
+            '\twireUp(f, mixer, nil, "Left")',
+            '\twireUp(f, mixer, nil, "Right")',
+            "\tplayers[i], faders[i] = p, f",
+            "end",
+            "",
+            "local current = 1",
+            "local function switchTo(i)",
+            "\tif i == current then return end",
+            "\tmainFader.Volume = (i == 1) and 1 or 0",
+            "\tfor j = 2, #PLAYLIST do",
+            "\t\tfaders[j].Volume = (j == i) and 1 or 0",
+            "\t\tif j ~= i and players[j].IsPlaying then players[j]:Stop() end",
+            "\tend",
+            "\tif i > 1 then",
+            "\t\tplayers[i].TimePosition = 0",
+            "\t\tplayers[i]:Play()",
+            "\tend",
+            "\tcurrent = i",
+            "end",
+            "",
+            "-- Embedded code: marker frequencies in this asset (Hz).",
+            f"-- {freq_table}",
+            f"local FREQ = {{ {', '.join(f'{audiocode_freq(i):.0f}' for i in range(1, AUDIOCODE_MAX_COMMANDS + 1))} }}",
+            "local lastCmd, lastTime = nil, 0",
+            "RunService.Heartbeat:Connect(function()",
+            "\tlocal spectrum = analyzer:GetSpectrum()",
+            "\tif #spectrum == 0 then return end",
+            "\tlocal best, bestLevel = nil, THRESHOLD",
+            "\tfor n = 1, math.min(#PLAYLIST, #FREQ) do",
+            "\t\tlocal bin = math.floor(FREQ[n] / 24000 * #spectrum) + 1",
+            "\t\tlocal level = spectrum[bin] or 0",
+            "\t\tif level > bestLevel then best, bestLevel = n, level end",
+            "\tend",
+            "\tlocal now = os.clock()",
+            "\tif best and (best ~= lastCmd or now - lastTime > 1) then",
+            "\t\tlastCmd, lastTime = best, now",
+            "\t\tswitchTo(best)",
+            "\tend",
+            "end)",
+            "",
+            "mainPlayer:Play()",
+        ]
+        in_game_script = "\n".join(script_lines) + "\n"
     elif method == METHOD_SINGLE:
         # ONE clean asset, original pitch and speed, no tricks.  Research
         # findings baked in:

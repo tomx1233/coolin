@@ -109,12 +109,21 @@ class CoolinApp(tk.Tk):
                    command=self.on_browse_bait).grid(
             row=3, column=2, padx=(4, 8), pady=(4, 4))
 
-        ttk.Label(options_frame, text="Method:").grid(
+        ttk.Label(options_frame, text="Cue timeline (audiocode):").grid(
             row=4, column=0, sticky="w", padx=8, pady=(4, 4))
+        self.cues_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=self.cues_var).grid(
+            row=4, column=1, sticky="ew", padx=4, pady=(4, 4))
+        ttk.Label(options_frame, text="e.g. 12.5:2,45:3 (time:file)").grid(
+            row=4, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+
+        ttk.Label(options_frame, text="Method:").grid(
+            row=5, column=0, sticky="w", padx=8, pady=(4, 4))
         self.method_var = tk.StringVar(value=pipeline.METHOD_VORBIS)
         ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
                      values=(
                          pipeline.METHOD_VORBIS,
+                         pipeline.METHOD_AUDIOCODE,
                          pipeline.METHOD_SINGLE,
                          pipeline.METHOD_CHUNKED,
                          pipeline.METHOD_EQMASK,
@@ -125,14 +134,14 @@ class CoolinApp(tk.Tk):
                          pipeline.METHOD_INVERT_SPEED,
                          pipeline.METHOD_MULTISTREAM,
                      ),
-                     state="readonly").grid(row=4, column=1, sticky="w", padx=4, pady=(4, 4))
+                     state="readonly").grid(row=5, column=1, sticky="w", padx=4, pady=(4, 4))
         ttk.Label(options_frame, text="vorbis = instant-accept profile (best)").grid(
-            row=4, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+            row=5, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Per-chunk / Discord duration (max 6:59):").grid(
-            row=5, column=0, sticky="w", padx=8, pady=(4, 8))
+            row=6, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
-        controls.grid(row=5, column=1, columnspan=2, sticky="w",
+        controls.grid(row=6, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
         self.seconds_var = tk.StringVar()
         self._default_seconds_for_method(self.method_var.get())
@@ -187,7 +196,7 @@ class CoolinApp(tk.Tk):
             default = pipeline.DEFAULT_CHUNK_SECONDS
         elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
                         pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT,
-                        pipeline.METHOD_VORBIS):
+                        pipeline.METHOD_VORBIS, pipeline.METHOD_AUDIOCODE):
             default = pipeline.SINGLE_MAX_SECONDS
         else:
             default = pipeline.DEFAULT_FAKE_SECONDS
@@ -302,13 +311,13 @@ class CoolinApp(tk.Tk):
                   self.same_folder_var.get(), self.output_dir_var.get().strip(),
                   raw_asset_name, self.method_var.get(),
                   self.mask_depth_var.get(), self.bait_path_var.get().strip(),
-                  self.pan_hz_var.get()),
+                  self.pan_hz_var.get(), self.cues_var.get().strip()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path, pan_hz) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path, pan_hz, cues) -> None:
         try:
             pan_hz = float(pan_hz)
         except (TypeError, ValueError):
@@ -345,6 +354,7 @@ class CoolinApp(tk.Tk):
                     mask_depth=mask_depth,
                     bait_path=bait_path or None,
                     pan_hz=pan_hz,
+                    cues=cues or None,
                     asset_name=single_name,
                     log=self.log_queue.put,
                 )

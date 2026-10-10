@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("vorbis", "single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
+        choices=("vorbis", "audiocode", "single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
         default=pipeline.METHOD_VORBIS,
         help=(
             "conversion method: 'vorbis' (RECOMMENDED: replicates the field-tested gtiiii.ogg "
@@ -54,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Roblox's audio engine natively speaks, so uploads are accepted immediately; the "
             "generated script includes the official fixes for the plays-on-web-but-not-in-game "
             "bug), "
+            "'audiocode' (embeds a code INSIDE the audio file - quiet marker tones on "
+            "the left channel - that makes the generated in-game script switch between "
+            "different audio files at the coded moments; supply cues with --cue), "
             "'single' (ONE clean asset at original pitch & speed - lossless "
             "FLAC or 320k MP3, capped at 6:58 to dodge Roblox's near-limit upload bug; longer "
             "songs are trimmed), 'chunked' (splits the full song - any length, even over 6:59 - "
@@ -80,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
              "(e.g. 25 for 25 Hz). Applied by 'single', 'eqmask', 'chunked' and the "
              "Discord methods; for 'bait' the generated script pans in game instead; "
              "not applied for 'monogate' (it would break the noise cancellation).",
+    )
+    parser.add_argument(
+        "--cue", action="append", metavar="T:N",
+        help="cue timeline for the 'audiocode' method: at time T seconds, switch to "
+             "playlist file N (N>=2; 1 = back to the coded file's own music). Repeat "
+             "the flag or comma-separate: --cue 12.5:2,45:3",
     )
     parser.add_argument(
         "--bait", metavar="AUDIO",
@@ -141,7 +150,7 @@ def main(argv=None) -> int:
                 raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
             elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
                                  pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT,
-                                 pipeline.METHOD_VORBIS):
+                                 pipeline.METHOD_VORBIS, pipeline.METHOD_AUDIOCODE):
                 raw_seconds = pipeline.SINGLE_MAX_SECONDS
             else:
                 raw_seconds = pipeline.DEFAULT_FAKE_SECONDS
@@ -167,6 +176,7 @@ def main(argv=None) -> int:
                 mask_depth=args.mask_depth,
                 bait_path=args.bait,
                 pan_hz=args.pan_hz,
+                cues=",".join(args.cue) if args.cue else None,
                 asset_name=args.asset_name,
             )
         except Exception as exc:
