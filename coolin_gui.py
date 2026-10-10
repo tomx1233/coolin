@@ -137,7 +137,11 @@ class CoolinApp(tk.Tk):
         self._default_seconds_for_method(self.method_var.get())
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")
-        ttk.Label(controls, text="   Mask dB:").pack(side="left", padx=(16, 4))
+        ttk.Label(controls, text="   Pan Hz:").pack(side="left", padx=(16, 4))
+        self.pan_hz_var = tk.StringVar(value="0")
+        ttk.Spinbox(controls, from_=0, to=30, increment=1, width=4,
+                    textvariable=self.pan_hz_var).pack(side="left")
+        ttk.Label(controls, text="   Mask dB:").pack(side="left", padx=(8, 4))
         self.mask_depth_var = tk.StringVar(value="18")
         ttk.Spinbox(controls, from_=6, to=30, increment=1, width=4,
                     textvariable=self.mask_depth_var).pack(side="left")
@@ -295,13 +299,20 @@ class CoolinApp(tk.Tk):
             args=(files, seconds, self.codec_var.get(),
                   self.same_folder_var.get(), self.output_dir_var.get().strip(),
                   raw_asset_name, self.method_var.get(),
-                  self.mask_depth_var.get(), self.bait_path_var.get().strip()),
+                  self.mask_depth_var.get(), self.bait_path_var.get().strip(),
+                  self.pan_hz_var.get()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path, pan_hz) -> None:
+        try:
+            pan_hz = float(pan_hz)
+        except (TypeError, ValueError):
+            pan_hz = 0.0
+        if pan_hz <= 0:
+            pan_hz = None
         try:
             mask_depth = float(mask_depth)
         except (TypeError, ValueError):
@@ -331,6 +342,7 @@ class CoolinApp(tk.Tk):
                     method=method,
                     mask_depth=mask_depth,
                     bait_path=bait_path or None,
+                    pan_hz=pan_hz,
                     asset_name=single_name,
                     log=self.log_queue.put,
                 )

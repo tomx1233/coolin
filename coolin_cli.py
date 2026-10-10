@@ -69,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--pan-hz", type=float, default=None, metavar="HZ",
+        help="bake an ear-to-ear panning effect at this rate into the output "
+             "(e.g. 25 for 25 Hz). Applied by 'single', 'eqmask', 'chunked' and the "
+             "Discord methods; for 'bait' the generated script pans in game instead; "
+             "not applied for 'monogate' (it would break the noise cancellation).",
+    )
+    parser.add_argument(
         "--bait", metavar="AUDIO",
         help="audio file to use as the bait/decoy for the 'bait' method (looped to cover "
              "the song; default: a generated soft chime)",
@@ -152,6 +159,7 @@ def main(argv=None) -> int:
                 chunk_format=args.chunk_format,
                 mask_depth=args.mask_depth,
                 bait_path=args.bait,
+                pan_hz=args.pan_hz,
                 asset_name=args.asset_name,
             )
         except Exception as exc:

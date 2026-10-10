@@ -55,6 +55,19 @@ EQMASK_MID_CENTER_HZ = 894.0
 EQMASK_MID_WIDTH_OCT = 4.32
 
 
+def pan_filter(pan_hz: Optional[float]) -> str:
+    """Ear-to-ear panning filter (apulsator) at *pan_hz* Hz; '' when off."""
+    if not pan_hz:
+        return ""
+    return f"apulsator=hz={pan_hz:g}"
+
+
+def join_filters(*parts: str) -> Optional[str]:
+    """Join non-empty filter fragments; None when all are empty."""
+    joined = ",".join(p for p in parts if p)
+    return joined or None
+
+
 def eqmask_filters() -> "tuple[str, str]":
     """Return (cut_filter, restore_filter) for the eqmask method."""
     cut = (
@@ -203,6 +216,7 @@ def craft(
     chunk_format: str = "auto",
     mask_depth: float = 18.0,
     bait_path: Optional[str] = None,
+    pan_hz: Optional[float] = None,
     log: Callable[[str], None] = print,
     *,
     duration_seconds: Optional[float] = None,
@@ -289,6 +303,8 @@ def craft(
 
     raw_duration = duration_seconds if duration_seconds is not None else fake_seconds
     target_seconds = parse_duration(raw_duration)
+    if pan_hz is not None and not (0.05 <= pan_hz <= 100.0):
+        raise ValueError("pan_hz must be between 0.05 and 100 Hz")
 
     log(f"[1/4] Looking for ffmpeg...")
     exe = ffmpeg_util.find_ffmpeg()
@@ -320,7 +336,7 @@ def craft(
     if method == METHOD_INVERT:
         log(f"[3/4] Applying Phase Invert Method (L=+audio, R=-audio; mono preview cancels to silence)...")
         enc_dur = safe_encode_duration(song_max)
-        inv_filter = "pan=stereo|c0=c0|c1=-1*c0"
+        inv_filter = join_filters("pan=stereo|c0=c0|c1=-1*c0", pan_filter(pan_hz))
         encoder = ffmpeg_util.convert_to_ogg(
             exe, input_path, output_path, codec, duration=enc_dur, audio_filter=inv_filter, log=log
         )
@@ -345,7 +361,10 @@ def craft(
         out_dur = song_max / factor
         enc_dur = safe_encode_duration(out_dur)
         log(f"[3/4] Applying Speed-Invert Method ({factor:.2f}x speed -> {enc_dur:.2f}s duration)...")
-        speed_filter = f"aresample=48000,asetrate=48000*{factor:.6f},aresample=48000"
+        speed_filter = join_filters(
+            f"aresample=48000,asetrate=48000*{factor:.6f},aresample=48000",
+            pan_filter(pan_hz),
+        )
         encoder = ffmpeg_util.convert_to_ogg(
             exe, input_path, output_path, codec, duration=enc_dur, audio_filter=speed_filter, log=log
         )
@@ -371,7 +390,11 @@ def craft(
         out_dur = song_max / factor
         enc_dur = safe_encode_duration(out_dur)
         log(f"[3/4] Applying Invert + Speed Method ({factor:.2f}x speed + phase inversion)...")
-        combo_filter = f"aresample=48000,asetrate=48000*{factor:.6f},aresample=48000,pan=stereo|c0=c0|c1=-1*c0"
+        combo_filter = join_filters(
+            f"aresample=48000,asetrate=48000*{factor:.6f},aresample=48000,"
+            f"pan=stereo|c0=c0|c1=-1*c0",
+            pan_filter(pan_hz),
+        )
         encoder = ffmpeg_util.convert_to_ogg(
             exe, input_path, output_path, codec, duration=enc_dur, audio_filter=combo_filter, log=log
         )
@@ -462,7 +485,8 @@ def craft(
                     else:
                         encoder = ffmpeg_util.convert_segment(
                             exe, input_path, path, fmt=fmt,
-                            start_time=start, duration=dur, log=log,
+                            start_time=start, duration=dur,
+                            audio_filter=pan_filter(pan_hz), log=log,
                         )
                 except RuntimeError as exc:
                     last_error = exc
@@ -616,7 +640,8 @@ def craft(
                 path = os.path.join(out_dir, f"{out_base}_single.{fmt}")
             try:
                 encoder = ffmpeg_util.convert_segment(
-                    exe, input_path, path, fmt=fmt, duration=encode_dur, log=log
+                    exe, input_path, path, fmt=fmt, duration=encode_dur,
+                    audio_filter=pan_filter(pan_hz), log=log,
                 )
             except RuntimeError as exc:
                 last_error = exc
@@ -633,6 +658,10 @@ def craft(
                 f"Could not encode the song under the 20 MB upload limit: {last_error}"
             )
 
+        if pan_hz:
+            log(
+                f"      Pan: ear-to-ear panning baked in at {pan_hz:g} Hz."
+            )
         output_path = chosen_path
         out_codec = "flac" if chosen_path.endswith(".flac") else "mp3"
         declared_seconds = ffmpeg_util.probe_duration(exe, chosen_path) or encode_dur
@@ -667,6 +696,11 @@ def craft(
         # MONO (Roblox 3D sounds parented to a Part/Attachment play mono and
         # sum L+R, which cancels the anti-correlated noise).
         #   L = music + noise,  R = music - noise
+        if pan_hz:
+            log(
+                f"      Note: pan ({pan_hz:g} Hz) is NOT applied for monogate - "
+                f"it would break the stereo noise cancellation."
+            )
         full_dur = total_dur if total_dur else song_max
         cap = min(target_seconds, SINGLE_MAX_SECONDS)
         encode_dur = full_dur
@@ -767,6 +801,7 @@ def craft(
         # AudioEqualizers (+10 dB per band per layer).  Channel-independent:
         # works for 2D, 3D, mono, stereo, left-only and volumetric playback.
         cut_filter, restore_filter = eqmask_filters()
+        cut_filter = join_filters(cut_filter, pan_filter(pan_hz)) or cut_filter
         full_dur = total_dur if total_dur else song_max
         cap = min(target_seconds, SINGLE_MAX_SECONDS)
         encode_dur = full_dur
@@ -918,6 +953,12 @@ def craft(
             f"bait file {os.path.basename(bait_path)}"
             if bait_path else "generated soft chime"
         )
+        if pan_hz:
+            log(
+                f"      Pan: the generated script pans the song ear-to-ear at "
+                f"{pan_hz:g} Hz in game (pan is not baked into a bait asset - "
+                f"the game only plays one channel)."
+            )
         log(
             f"[3/4] Bait Method: LEFT = {bait_desc} (what the preview plays), "
             f"RIGHT = song cut {EQMASK_CUT_DB:.0f} dB below 4 kHz "
@@ -993,6 +1034,32 @@ def craft(
             "bait channel and restores the song.  2D or 3D both work."
         )
 
+        if pan_hz:
+            wiring_lines = [
+                "",
+                f"-- Ear-to-ear pan at {pan_hz:g} Hz (two faders, oppositely modulated).",
+                'local RunService = game:GetService("RunService")',
+                f"local PAN_HZ = {pan_hz:g}",
+                'local faderL = Instance.new("AudioFader")',
+                'local faderR = Instance.new("AudioFader")',
+                "faderL.Parent = script",
+                "faderR.Parent = script",
+                'wireUp(splitter, faderL, "Right")',
+                'wireUp(splitter, faderR, "Right")',
+                'wireUp(faderL, mixer, nil, "Left")',
+                'wireUp(faderR, mixer, nil, "Right")',
+                "RunService.Heartbeat:Connect(function()",
+                "\tlocal phase = os.clock() * PAN_HZ * 2 * math.pi",
+                "\tlocal pan = 0.5 + 0.5 * math.sin(phase)  -- 0..1 left..right",
+                "\tfaderL.Volume = pan",
+                "\tfaderR.Volume = 1 - pan",
+                "end)",
+            ]
+        else:
+            wiring_lines = [
+                'wireUp(splitter, mixer, "Right", "Left")',
+                'wireUp(splitter, mixer, "Right", "Right")',
+            ]
         script_lines = [
             "-- Coolin Bait Song Player (generated)",
             "-- LEFT channel of the asset = bait decoy; RIGHT channel = the real song",
@@ -1031,8 +1098,7 @@ def craft(
             'local mixer = Instance.new("AudioChannelMixer")',
             "mixer.Layout = Enum.AudioChannelLayout.Stereo",
             "mixer.Parent = script",
-            'wireUp(splitter, mixer, "Right", "Left")',
-            'wireUp(splitter, mixer, "Right", "Right")',
+            *wiring_lines,
             "",
             "local prev = mixer",
             "for i = 1, LAYERS do",
@@ -1082,7 +1148,8 @@ def craft(
             os.close(fd2)
             try:
                 encoder = ffmpeg_util.convert_to_ogg(
-                    exe, input_path, tmp_s1, codec, duration=target_seconds, log=log
+                    exe, input_path, tmp_s1, codec, duration=target_seconds,
+                    audio_filter=pan_filter(pan_hz), log=log,
                 )
                 rem_dur = song_max - target_seconds
                 enc_rem = (
@@ -1091,7 +1158,8 @@ def craft(
                     else rem_dur
                 )
                 ffmpeg_util.convert_to_ogg(
-                    exe, input_path, tmp_s2, codec, start_time=target_seconds, duration=enc_rem, log=log
+                    exe, input_path, tmp_s2, codec, start_time=target_seconds,
+                    duration=enc_rem, audio_filter=pan_filter(pan_hz), log=log,
                 )
                 with open(tmp_s1, "rb") as h1:
                     s1_data = h1.read()

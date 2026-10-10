@@ -105,6 +105,9 @@ python coolin_cli.py song.mp3 -m bait
 
 :: use your own decoy audio
 python coolin_cli.py song.mp3 -m bait --bait innocent_clip.mp3
+
+:: 25 Hz ear-to-ear panning on any method
+python coolin_cli.py song.mp3 --pan-hz 25
 ```
 
 ### The `eqmask` method — inaudible in the preview, restored in-game (recommended for hiding)
@@ -137,6 +140,15 @@ L + R = 2 × music        mono (in-game):    the noise cancels — clean music
 - **In-game requirements (generated script does this):** the Sound must be parented to a **Part or Attachment** (3D) — a 2D Sound (SoundService) plays stereo = noise. `Volume = 10` compensates the mask depth.
 - `--mask-depth` (default 18 dB): higher = stronger masking but quieter in-game; lower = louder in-game but more audible in the preview.
 - Caveat: this relies on Roblox's 3D mono conversion *summing* the channels (standard downmix). Test in Studio with your own ears first — the proof file makes that a 10-second check.
+
+### Ear-to-ear panning (`--pan-hz`)
+
+Bakes a rapid left↔right panning effect into the output (ffmpeg `apulsator`). `--pan-hz 25` sweeps the song between your ears 25 times per second — measured: +11 dB left-dominant in the first 10 ms, +11 dB right-dominant 20 ms later.
+
+- Applied by `single`, `eqmask`, `chunked` (each chunk pans continuously) and the Discord methods.
+- `bait`: the pan cannot be baked (the game plays only one channel of the asset), so the generated script pans **in game** instead — two `AudioFader`s between the splitter and mixer, oppositely modulated on `Heartbeat`.
+- `monogate`: skipped with a warning (panning would break the stereo noise cancellation).
+- GUI: **Pan Hz** spinbox (0 = off).
 
 ## Other methods
 

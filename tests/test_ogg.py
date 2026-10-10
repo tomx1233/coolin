@@ -625,6 +625,66 @@ class OggCraftingTest(unittest.TestCase):
             self.assertTrue(report["all_crcs_valid"])
 
 
+    def test_pan_feature_alternates_ears_at_requested_hz(self):
+        """--pan-hz 25: the output must alternate left/right dominance at
+        25 Hz (full-file balance equal, adjacent windows opposite)."""
+        out_path = os.path.join(self.tmpdir.name, "pan_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        log_lines = []
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="single",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             pan_hz=25.0, log=log_lines.append)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        self.assertTrue(any("apulsator=hz=25" in line for line in log_lines))
+
+        def window_vol(start: str, end: str, channel: int) -> float:
+            return ffmpeg_util.probe_mean_volume(
+                self.ffmpeg, ["-i", res.output_path],
+                f"atrim={start}:{end},pan=mono|c0=c{channel}")
+
+        # Full file: the pan preserves each channel's long-term level, so the
+        # output's L/R balance matches the input's (the test tone's right
+        # channel is half amplitude = ~6 dB quieter by construction).
+        in_L = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", self.wav_path], "pan=mono|c0=c0")
+        in_R = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", self.wav_path], "pan=mono|c0=c1")
+        full_L = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], "pan=mono|c0=c0")
+        full_R = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], "pan=mono|c0=c1")
+        self.assertAlmostEqual((full_L - full_R), (in_L - in_R), delta=2.0)
+
+        # 25 Hz period = 40 ms: 0-10 ms is left-dominant, 20-30 ms right-dominant
+        # (thresholds account for the tone's own 6 dB channel asymmetry).
+        w1_L, w1_R = window_vol("0", "0.010", 0), window_vol("0", "0.010", 1)
+        w2_L, w2_R = window_vol("0.020", "0.030", 0), window_vol("0.020", "0.030", 1)
+        self.assertGreater(w1_L - w1_R, 3.0, "first window must be left-dominant")
+        self.assertGreater(w2_R - w2_L, 3.0, "second window must be right-dominant")
+        # And the dominance must flip between the two windows.
+        self.assertGreater(
+            (w1_L - w1_R) - (w2_L - w2_R), 8.0,
+            "channel dominance must alternate at the requested rate")
+
+    def test_bait_method_pan_uses_in_game_script(self):
+        """Bait + pan: pan is NOT baked into the asset (the game plays only
+        one channel); instead the generated script contains the panner."""
+        out_path = os.path.join(self.tmpdir.name, "pan_out", "tone_bait.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="bait",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             pan_hz=25.0, log=lambda _: None)
+        self.assertIn("AudioFader", res.in_game_script)
+        self.assertIn("PAN_HZ = 25", res.in_game_script)
+        self.assertIn("faderL.Volume = pan", res.in_game_script)
+        self.assertIn("faderR.Volume = 1 - pan", res.in_game_script)
+        # The plain splitter->mixer wires are replaced by the fader path.
+        self.assertNotIn('wireUp(splitter, mixer, "Right", "Left")', res.in_game_script)
+        # Invalid pan rates are rejected.
+        with self.assertRaises(ValueError):
+            pipeline.craft(self.wav_path, method="single", pan_hz=500.0,
+                           log=lambda _: None)
+
     def test_gui_builds_without_use_before_assignment(self):
         """Regression test for the AttributeError crash:
         'CoolinApp' object has no attribute 'seconds_var'.
