@@ -1,24 +1,34 @@
 # Coolin 🎧
 
-**The best possible way to get a full song into Roblox at original quality — plus Discord preview tricks.**
+**One asset, original pitch & speed — the closest a full song can get to Roblox, plus Discord preview tricks.**
 
 Roblox's hard import limits (per the [official docs](https://create.roblox.com/docs/en-us/audio/assets)): single stream, `.mp3`/`.ogg`/`.wav`/`.flac`, **< 20 MB**, **< 7 minutes**, ≤ 48 kHz, mono/stereo — and Studio **transcodes every upload** (so it measures the *decoded* duration, not metadata).
+
+### What the research found (the "secret" is: no trick was needed)
+
+- **7 minutes applies to everyone** — there is no 10-second tier for private uploads (that limit is only for marketplace/public distribution). 100 uploads/month unverified, 2,000 verified.
+- **Opus-in-Ogg uploads are fragile on Roblox** — *"the audio engine expects ogg-vorbis"* (devforum); many "duration too long" / "asset creation failed" reports are actually codec/container handling issues, and **MP3 is the most upload-reliable format** per multiple community threads.
+- **Uploads near the 7:00 limit are a known bug zone** ("Cannot upload audio despite meeting requirements" — official bug thread, with random rejections). Stay at ≤ 6:58 and use Studio's Asset Manager; retry if the website flakes.
+- **Metadata tricks cannot work, ever**: Roblox re-encodes every upload and stores *their* transcode — the game plays their file, and the duration check decodes. Anything hidden inside a container is either measured (rejected) or discarded.
+- **Video assets are worse** for audio: 5-minute cap, 2,000 Robux each, 13+ ID-verified only.
+- Therefore for songs **≤ 6:58** the optimal upload is a *plain, clean, maximally-compatible file*: **lossless FLAC** (falls back to **320 kbps MP3** if the song won't fit 20 MB losslessly) — which is exactly what the `single` method produces.
 
 ## Every known method, compared
 
 | # | Method | Quality | Beats duration limit? | Notes |
 |---|---|---|---|---|
-| 1 | **`chunked` — lossless chunk split + in-game playlist** ⭐ | **Original (lossless source)** | ✅ Any song length | What Coolin does by default. Each chunk is a *genuinely* valid short file — nothing to detect. Roblox's own transcode is the only lossy step. |
-| 2 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
-| 3 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
-| 4 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
-| 5 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
-| 6 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
-| 7 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
-| 8 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
-| 9 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
-| 10 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
-| 11 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
+| 1 | **`single` — one clean lossless asset** ⭐ (default) | **Original (lossless FLAC)** | ✅ up to 6:58 | One asset, original pitch & speed, no tricks. FLAC → 320k MP3 fallback; 6:58 cap dodges the near-limit upload bug. |
+| 2 | **`chunked` — lossless chunk split + in-game playlist** | **Original (lossless source)** | ✅ Any song length | Each chunk is a *genuinely* valid short file — nothing to detect. Roblox's own transcode is the only lossy step. Use this for songs longer than 6:58. |
+| 3 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
+| 4 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
+| 5 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
+| 6 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
+| 7 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
+| 8 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
+| 9 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
+| 10 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
+| 11 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
+| 12 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
 
 ## The `chunked` method (default) — how it gets closest to the original
 
@@ -36,10 +46,13 @@ Since Roblox transcodes every upload anyway, feeding it **lossless** chunks mean
 ### Usage
 
 ```bat
-:: default: 6:59 chunks, auto quality (lossless when possible)
+:: default: ONE clean asset (lossless FLAC, or 320k MP3 if too big), 6:58 cap
 python coolin_cli.py song.mp3
 
 :: same, explicitly
+python coolin_cli.py song.mp3 -m single
+
+:: keep the WHOLE song when it's longer than 6:58: chunked split instead
 python coolin_cli.py song.mp3 -m chunked -d 6:59
 
 :: force a chunk format (auto is recommended)

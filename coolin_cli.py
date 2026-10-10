@@ -20,9 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="coolin",
         description=(
-            "Convert audio files into Discord-compatible OGG files that actually "
-            "stop playing at the specified duration (default: 2 seconds, "
-            "max: 6 minutes and 59 seconds)."
+            "Convert audio into Roblox-ready assets. Default method 'single': ONE "
+            "clean asset at original pitch & speed (lossless FLAC, or 320k MP3 if "
+            "too big), capped at 6:58 to stay safely under Roblox's 7-minute "
+            "import limit. Method 'chunked' splits songs of ANY length into "
+            "lossless upload-safe chunks plus a gapless in-game playlist script."
         ),
     )
     parser.add_argument("inputs", nargs="*", help="audio files to convert")
@@ -43,16 +45,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("chunked", "invert", "speed", "invert_speed", "multistream"),
-        default=pipeline.METHOD_CHUNKED,
+        choices=("single", "chunked", "invert", "speed", "invert_speed", "multistream"),
+        default=pipeline.METHOD_SINGLE,
         help=(
-            "conversion method: 'chunked' (RECOMMENDED: splits the full song - any length, "
-            "even over 6:59 - into lossless upload-safe chunk files and generates an in-game "
-            "Script that plays them as one continuous song at original quality), "
+            "conversion method: 'single' (ONE clean asset at original pitch & speed - lossless "
+            "FLAC or 320k MP3, capped at 6:58 to dodge Roblox's near-limit upload bug; longer "
+            "songs are trimmed), 'chunked' (splits the full song - any length, even over 6:59 - "
+            "into lossless upload-safe chunk files and generates an in-game Script that plays "
+            "them as one continuous song at original quality), "
             "'invert' (phase inversion: cancels to silence in mono/preview, plays in-game), "
             "'speed' (playback speed invert: short physical file, plays full song in-game via "
             "Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' (chained OGG for the "
-            "Discord preview trick). Default: chunked"
+            "Discord preview trick). Default: single"
         ),
     )
     parser.add_argument(
@@ -100,11 +104,12 @@ def main(argv=None) -> int:
         parser.error("-n/--name can only be used with a single input file")
     try:
         if args.seconds is None:
-            raw_seconds = (
-                pipeline.DEFAULT_CHUNK_SECONDS
-                if args.method == pipeline.METHOD_CHUNKED
-                else pipeline.DEFAULT_FAKE_SECONDS
-            )
+            if args.method == pipeline.METHOD_CHUNKED:
+                raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
+            elif args.method == pipeline.METHOD_SINGLE:
+                raw_seconds = pipeline.SINGLE_MAX_SECONDS
+            else:
+                raw_seconds = pipeline.DEFAULT_FAKE_SECONDS
         else:
             raw_seconds = args.seconds
         seconds = pipeline.parse_duration(raw_seconds)

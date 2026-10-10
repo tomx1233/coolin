@@ -24,12 +24,14 @@ METHOD_SPEED = "speed"
 METHOD_INVERT_SPEED = "invert_speed"
 METHOD_MULTISTREAM = "multistream"
 METHOD_CHUNKED = "chunked"
+METHOD_SINGLE = "single"
 SUPPORTED_METHODS = (
     METHOD_INVERT,
     METHOD_SPEED,
     METHOD_INVERT_SPEED,
     METHOD_MULTISTREAM,
     METHOD_CHUNKED,
+    METHOD_SINGLE,
 )
 
 # Default per-chunk length for the chunked method.  Roblox's import limit is
@@ -44,6 +46,11 @@ MAX_UPLOAD_BYTES = 19_000_000   # safely under the 20 MB limit
 WAV_MAX_SECONDS = 95.0          # 48 kHz stereo 16-bit WAV stays under 20 MB
 OPUS_MAX_BITRATE = 256_000      # widely-supported libopus ceiling (transparent for stereo)
 CHUNK_FORMATS = ("auto", "wav", "flac", "ogg")
+# Duration kept under the 7:00 import limit for single-asset uploads.  Roblox
+# has a known bug zone for files close to the limit ("Cannot upload audio
+# despite meeting requirements" devforum thread), so stay a little under.
+SINGLE_MAX_SECONDS = 418.0      # 6:58 - comfortably under 7:00 even after re-encode padding
+SINGLE_FORMATS = ("flac", "mp3")  # FLAC = lossless; MP3 = most reliable on Roblox's pipeline
 
 
 def sanitize_asset_name(name: str, max_length: int = MAX_ASSET_NAME_LENGTH) -> str:
@@ -185,6 +192,14 @@ def craft(
       all chunks and plays them back to back as one continuous song at normal
       speed, pitch and original quality. chunk_format: 'auto' (default),
       'wav', 'flac' or 'ogg'.
+    - 'single': ONE clean asset at original pitch and speed - no tricks, no
+      Ogg/Opus (Roblox's pipeline prefers ogg-vorbis and handles Opus poorly),
+      no limit-adjacent durations (6:58 cap dodges the known near-7:00 upload
+      bug zone).  Encoded losslessly as FLAC when it fits the 20 MB limit,
+      else 320 kbps MP3 (the most upload-reliable format per community
+      reports).  Songs longer than the cap are trimmed to it (a single Roblox
+      asset physically cannot hold more - Roblox re-encodes and measures the
+      decoded duration; use 'chunked' to keep every second).
     """
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -487,6 +502,99 @@ def craft(
             f"      Wrote {len(chunk_paths)} chunk file(s); upload them all and paste "
             f"their asset IDs into the script below."
         )
+    elif method == METHOD_SINGLE:
+        # ONE clean asset, original pitch and speed, no tricks.  Research
+        # findings baked in:
+        #  - Roblox's import limit is 7 minutes for EVERYONE (no 10s tier for
+        #    private uploads), measured on the DECODED duration.
+        #  - Roblox's pipeline handles Opus-in-Ogg poorly ("the audio engine
+        #    expects ogg-vorbis" - devforum), so we never emit Ogg here.
+        #  - Uploads near the 7:00 limit are a known bug zone; stay under 6:58.
+        #  - MP3 is the most reliable format per community reports; FLAC is
+        #    lossless.  Ladder: FLAC if it fits the 20 MB limit, else MP3 320k.
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)
+        encode_dur = full_dur
+        if full_dur > cap:
+            log(
+                f"[3/4] Single-asset Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"a single Roblox asset holds at most {ogg_util.format_seconds(cap)} "
+                f"(hard platform limit - Roblox re-encodes and measures decoded duration, "
+                f"so a longer song CANNOT hide inside one asset)."
+            )
+            log(
+                f"      Encoding the first {ogg_util.format_seconds(cap)} at ORIGINAL pitch "
+                f"and speed; use -m chunked to keep the whole song instead."
+            )
+            encode_dur = cap
+        else:
+            log(
+                f"[3/4] Single-asset Method: encoding the full "
+                f"{ogg_util.format_seconds(full_dur)} song as ONE clean asset "
+                f"(original pitch & speed, no tricks)..."
+            )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+
+        encoder = ""
+        chosen_path = None
+        last_error: Exception | None = None
+        for fmt in SINGLE_FORMATS:
+            path = os.path.join(out_dir, f"{out_base}.{fmt}")
+            if os.path.normcase(path) == os.path.normcase(input_path):
+                path = os.path.join(out_dir, f"{out_base}_single.{fmt}")
+            try:
+                encoder = ffmpeg_util.convert_segment(
+                    exe, input_path, path, fmt=fmt, duration=encode_dur, log=log
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+            if os.path.getsize(path) <= MAX_UPLOAD_BYTES:
+                chosen_path = path
+                break
+            try:
+                os.remove(path)  # too big; next rung
+            except OSError:
+                pass
+        if chosen_path is None:
+            raise RuntimeError(
+                f"Could not encode the song under the 20 MB upload limit: {last_error}"
+            )
+
+        output_path = chosen_path
+        out_codec = "flac" if chosen_path.endswith(".flac") else "mp3"
+        declared_seconds = ffmpeg_util.probe_duration(exe, chosen_path) or encode_dur
+        actual_seconds = declared_seconds
+        size_mb = os.path.getsize(chosen_path) / 1_000_000
+        lossless_note = "lossless" if out_codec == "flac" else "320 kbps MP3 (near-transparent)"
+        log(
+            f"      Wrote {chosen_path} [{out_codec.upper()} {lossless_note} | "
+            f"{ogg_util.format_seconds(declared_seconds)} | {size_mb:.2f} MB]"
+        )
+        log(
+            "      Upload this ONE file as a single audio asset (Studio's Asset Manager "
+            "is the most reliable importer; if the website rejects a valid file, retry - "
+            "Roblox's importer has known random failures near the length limit)."
+        )
+        in_game_script = (
+            f"-- Single-asset Method ({ogg_util.format_seconds(declared_seconds)} at "
+            f"original pitch & speed - no special setup)\n"
+            f"local sound = script.Parent\n"
+            f'sound.SoundId = "rbxassetid://0" -- your uploaded asset ID\n'
+            f"sound.Volume = 1\n"
+            f"sound:Play()\n"
+        )
+        if full_dur > cap:
+            in_game_script += (
+                f"-- NOTE: only the first {ogg_util.format_seconds(cap)} of the "
+                f"{ogg_util.format_seconds(full_dur)} song fits on one asset "
+                f"(Roblox hard limit).\n"
+            )
     else:  # METHOD_MULTISTREAM
         if target_seconds >= song_max:
             log(

@@ -37,6 +37,22 @@ def make_tone_wav(path: str, seconds: float = TONE_SECONDS, rate: int = 44100) -
         handle.writeframes(bytes(frames))
 
 
+def make_noise_wav(path: str, seconds: float = 120.0, rate: int = 44100) -> None:
+    """Write a stereo white-noise WAV - the worst case for FLAC compression."""
+    import random
+    random.seed(1234)
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        chunk = bytearray()
+        for i in range(rate):  # one second of noise, tiled
+            chunk += struct.pack("<hh", random.randint(-14000, 14000),
+                                 random.randint(-14000, 14000))
+        for _ in range(int(seconds)):
+            handle.writeframes(bytes(chunk))
+
+
 def make_long_wav(path: str, seconds: float = 425.0, rate: int = 8000) -> None:
     """Write a mono WAV longer than the 6:59 upload limit (small + fast)."""
     with wave.open(path, "wb") as handle:
@@ -303,6 +319,65 @@ class OggCraftingTest(unittest.TestCase):
         dur = ffmpeg_util.probe_duration(self.ffmpeg, out_path)
         self.assertIsNotNone(dur)
         self.assertAlmostEqual(dur, 2.0, delta=0.5)
+
+    def test_single_method_one_clean_asset(self):
+        """Single method: ONE clean file at original pitch & speed - lossless
+        FLAC when it fits, under the 7:00 limit and the 20 MB size limit."""
+        out_path = os.path.join(self.tmpdir.name, "single_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="single",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        # Exactly one output file, FLAC (small stereo tone fits lossless).
+        self.assertEqual(len(res.chunk_paths), 0)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        self.assertTrue(os.path.isfile(res.output_path))
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+        # Full song, normal pitch/speed: declared == decoded duration.
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+        decoded = ffmpeg_util.decode_duration(self.ffmpeg, res.output_path)
+        self.assertAlmostEqual(decoded, TONE_SECONDS, delta=0.5)
+        # Well under the 7-minute import limit.
+        self.assertLess(probed, 420.0)
+        # Simple play script, no PlaybackSpeed tricks.
+        self.assertIn("sound:Play()", res.in_game_script)
+        self.assertNotIn("PlaybackSpeed", res.in_game_script)
+
+    def test_single_method_trims_songs_over_the_limit(self):
+        """A song longer than the 6:58 single-asset cap is trimmed to it (one
+        asset physically cannot hold more on Roblox)."""
+        long_wav = os.path.join(self.tmpdir.name, "long_song_single.wav")
+        make_long_wav(long_wav, seconds=425.0)
+        out_path = os.path.join(self.tmpdir.name, "single_out", "long.ogg")
+        res = pipeline.craft(long_wav, output_path=out_path, method="single",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertGreaterEqual(probed, pipeline.SINGLE_MAX_SECONDS - 2.0)
+        self.assertLess(probed, 420.0)
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+
+    def test_single_method_oversized_flac_falls_back_to_mp3(self):
+        """If lossless FLAC would exceed the 20 MB upload limit, the output
+        must fall back to 320 kbps MP3, which always fits for <= 6:58."""
+        # Incompressible noise at full stereo scale forces FLAC to its
+        # worst case; a ~2 minute noise track lands well over 19 MB in FLAC
+        # (425s of noise would exceed 20MB in FLAC by far; use 120s).
+        noise_wav = os.path.join(self.tmpdir.name, "noise.wav")
+        make_noise_wav(noise_wav, seconds=120.0)
+        out_path = os.path.join(self.tmpdir.name, "single_out", "noise.ogg")
+        res = pipeline.craft(noise_wav, output_path=out_path, method="single",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, 120.0, delta=1.0)
 
     def test_chunked_method_splits_song_into_uploadable_chunks(self):
         """Chunked method: the song is split into consecutive chunk files that

@@ -158,6 +158,11 @@ def convert_segment(
     elif fmt == "flac":
         codec_args = ["-c:a", "flac", "-compression_level", "8", "-ar", "48000"]
         codec = "flac"
+    elif fmt == "mp3":
+        # MP3 is the most battle-tested format on Roblox's import pipeline
+        # (multiple devforum threads: MP3 succeeds where OGG/Opus fails).
+        codec_args = ["-c:a", "libmp3lame", "-b:a", "320k", "-ar", "48000"]
+        codec = "libmp3lame"
     elif fmt == "ogg":
         encoders = available_encoders(exe)
         encoder = pick_encoder("auto", encoders)

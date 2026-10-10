@@ -4,6 +4,6 @@ Default method: chunked - splits any-length songs into lossless, upload-safe
 chunk files plus a gapless in-game playlist script.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = ["ffmpeg", "ogg", "pipeline", "__version__"]

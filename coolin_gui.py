@@ -102,17 +102,18 @@ class CoolinApp(tk.Tk):
 
         ttk.Label(options_frame, text="Method:").grid(
             row=3, column=0, sticky="w", padx=8, pady=(4, 4))
-        self.method_var = tk.StringVar(value=pipeline.METHOD_CHUNKED)
+        self.method_var = tk.StringVar(value=pipeline.METHOD_SINGLE)
         ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
                      values=(
+                         pipeline.METHOD_SINGLE,
+                         pipeline.METHOD_CHUNKED,
                          pipeline.METHOD_INVERT,
                          pipeline.METHOD_SPEED,
                          pipeline.METHOD_INVERT_SPEED,
                          pipeline.METHOD_MULTISTREAM,
-                         pipeline.METHOD_CHUNKED,
                      ),
                      state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
-        ttk.Label(options_frame, text="chunked = lossless upload-safe chunks + playlist script (best)").grid(
+        ttk.Label(options_frame, text="single = ONE asset, original pitch & speed (best)").grid(
             row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Per-chunk / Discord duration (max 6:59):").grid(
@@ -120,11 +121,7 @@ class CoolinApp(tk.Tk):
         controls = ttk.Frame(options_frame)
         controls.grid(row=4, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
-        self.seconds_var = tk.StringVar(value=str(
-            pipeline.DEFAULT_CHUNK_SECONDS
-            if self.method_var.get() == pipeline.METHOD_CHUNKED
-            else pipeline.DEFAULT_FAKE_SECONDS
-        ))
+        self._default_seconds_for_method(self.method_var.get())
         ttk.Spinbox(controls, from_=0.1, to=pipeline.MAX_SECONDS, increment=0.5, width=8,
                     textvariable=self.seconds_var).pack(side="left")
         ttk.Label(controls, text="   Codec:").pack(side="left", padx=(16, 4))
@@ -149,7 +146,8 @@ class CoolinApp(tk.Tk):
         self.log_text.pack(fill="both", expand=True, **pad)
         self.log(
             "Insert one or more audio files, pick a Method, and press Convert.\n"
-            "chunked (best): lossless upload-safe chunks + in-game playlist script - works for songs of ANY length\n"
+            "single (best): ONE asset, original pitch & speed, lossless FLAC or 320k MP3\n"
+            "chunked: full songs of ANY length as lossless upload-safe chunks + playlist script\n"
             "invert: silent in mono previews  |  speed: short file, restored in game  |  multistream: Discord stops early, VLC plays all"
         )
 
@@ -162,15 +160,29 @@ class CoolinApp(tk.Tk):
         # per-chunk upload length (instead of the 2s Discord preview).
         self.method_var.trace_add("write", self._on_method_changed)
 
+    def _default_seconds_for_method(self, method: str) -> None:
+        if method == pipeline.METHOD_CHUNKED:
+            default = pipeline.DEFAULT_CHUNK_SECONDS
+        elif method == pipeline.METHOD_SINGLE:
+            default = pipeline.SINGLE_MAX_SECONDS
+        else:
+            default = pipeline.DEFAULT_FAKE_SECONDS
+        self.seconds_var.set(str(default))
+
     def _on_method_changed(self, *_args) -> None:
-        if self.method_var.get() != pipeline.METHOD_CHUNKED:
-            return
+        method = self.method_var.get()
         try:
             current = float(self.seconds_var.get())
         except ValueError:
             current = None
-        if current == pipeline.DEFAULT_FAKE_SECONDS:
-            self.seconds_var.set(str(pipeline.DEFAULT_CHUNK_SECONDS))
+        known_defaults = {
+            pipeline.DEFAULT_FAKE_SECONDS,
+            pipeline.DEFAULT_CHUNK_SECONDS,
+            pipeline.SINGLE_MAX_SECONDS,
+        }
+        # Only auto-switch the duration if the user hasn't typed a custom value.
+        if current is None or current in known_defaults:
+            self._default_seconds_for_method(method)
 
     # ------------------------------------------------------------- helpers
     def log(self, message: str) -> None:
