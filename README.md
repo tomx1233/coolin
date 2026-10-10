@@ -20,17 +20,18 @@ Roblox's hard import limits (per the [official docs](https://create.roblox.com/d
 | 1 | **`single` — one clean lossless asset** ⭐ (default) | **Original (lossless FLAC)** | ✅ up to 6:58 | One asset, original pitch & speed, no tricks. FLAC → 320k MP3 fallback; 6:58 cap dodges the near-limit upload bug. |
 | 2 | **`chunked` — lossless chunk split + in-game playlist** | **Original (lossless source)** | ✅ Any song length | Each chunk is a *genuinely* valid short file — nothing to detect. Roblox's own transcode is the only lossy step. Use this for songs longer than 6:58. |
 | 3 | **`eqmask` — spectral mask + in-game EQ restore** ⭐ (for hiding) | Original (restored in-game) | ✅ up to 6:58 | **The robust hiding method.** Everything below 4 kHz is cut 40 dB at encode → the preview/moderation hears only faint sizzle (no vocals, no melody). The generated script chains 4 `AudioEqualizer`s (+10 dB Low+Mid each) to restore the song in-game. Channel-independent — works for 2D, 3D, mono, stereo, left-only, volumetric. |
-| 4 | **`monogate` — masked in stereo, clean in mono** | Original (in-game) | ✅ up to 6:58 | The **inverse of phase-inversion**: `L = music + noise, R = music − noise`. The stereo web preview/moderation hears only pink noise (music masked ~18 dB beneath); in-game 3D sounds play as **mono** (L+R), cancelling the noise → clean music. Sound must be parented to a Part/Attachment. **Unreliable: newer engines keep 3D sounds directional/stereo — prefer `eqmask`.** |
-| 5 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
-| 6 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
-| 7 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
-| 8 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
-| 9 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
-| 10 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
-| 11 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
-| 12 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
-| 13 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
-| 14 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
+| 4 | **`bait` — decoy channel + in-game channel-select** ⭐ (decoy) | Original (restored in-game) | ✅ up to 6:58 | **Plays a bait in the preview, the song in game.** LEFT channel = a clean bait (your own file via `--bait`, or a generated soft chime); RIGHT channel = the spectrally masked song. The generated script selects only the RIGHT channel (`AudioChannelSplitter` → `AudioChannelMixer` → EQ chain). Deterministic — no reliance on legacy 3D downmix behavior. |
+| 5 | **`monogate` — masked in stereo, clean in mono** | Original (in-game) | ✅ up to 6:58 | The **inverse of phase-inversion**: `L = music + noise, R = music − noise`. The stereo web preview/moderation hears only pink noise (music masked ~18 dB beneath); in-game 3D sounds play as **mono** (L+R), cancelling the noise → clean music. Sound must be parented to a Part/Attachment. **Unreliable: newer engines keep 3D sounds directional/stereo — prefer `eqmask`.** |
+| 6 | `speed` — speed-up + `Sound.PlaybackSpeed = 1/N` | Degraded (N× narrower audio band, chipmunk preview) | ✅ | Extreme factors may be clamped by Roblox; long songs sound bad. |
+| 7 | `invert` — phase inversion (L = +, R = −) | Original stereo | ❌ (hides from *mono moderation*, not duration) | Cancels to −91 dB in mono downmix; plays in stereo in-game. |
+| 8 | `invert_speed` — 2 + 3 combined | Degraded | ✅ | Same limits as `speed`. |
+| 9 | Metadata/granule spoofing (fake declared duration) | Original | ❌ **REJECTED** | Roblox decodes audio on import — measured duration is the real one. Coolin removed this method after it failed in practice. |
+| 10 | `multistream` — chained OGG streams | Original | ❌ Roblox rejects multi-stream containers | Great for the Discord 2-second preview trick (Chromium stops at the first EOS); useless for Roblox. |
+| 11 | One-file packing + `PlaybackRegion` (community) | Original | ❌ | Pack many sounds into one ≤7-min file and play a region per track — doesn't beat the 7-min wall. |
+| 12 | `Ended → Play` chaining (community) | Original | ✅ | Audible gaps between parts unless preloaded and pre-switched — Coolin's generated script does both (preload + 0.05s early switch). |
+| 13 | New Audio API (`AudioPlayer` + `Wire`) | Original | ❌ (same per-asset limits) | Modern playback graph; `AudioPlayer:Play()` resumes instead of restarting, so `Sound` remains simpler for gapless playlists. |
+| 14 | Sample-rate/bitrate reduction (community) | Degraded | ❌ (only helps the 20 MB *size* limit) | Never needed with Coolin — the quality ladder auto-fits size losslessly first. |
+| 15 | Alt accounts / group uploads (community) | n/a | ❌ (upload *quota* workaround only) | Tedious, ToS-gray; not a converter method. |
 
 ## The `chunked` method (default) — how it gets closest to the original
 
@@ -73,6 +74,38 @@ python coolin_cli.py song.mp3 -m chunked -f flac
 Then: upload every chunk → paste the returned asset IDs into the script's `CHUNK_IDS` table (in order) → put the Script in a Part or SoundService.
 
 If your account is under stricter duration limits than 7 minutes, set a smaller chunk length, e.g. `-d 10`.
+
+### The `bait` method — preview plays a decoy, in-game plays the song
+
+The closest thing to the "notepad++ bait file" idea that actually survives Roblox's transcode: **the difference must live in the audio itself, and the game must be able to deterministically select it.** The new Audio API's `AudioChannelSplitter` makes that possible — it exposes the asset's **Left** and **Right** channels as separate wireable pins:
+
+```
+LEFT  channel = bait (clean, full-band, ~-20 dB)   ← what the preview plays
+RIGHT channel = song with the eqmask 40 dB cut     ← inaudible under the bait
+```
+
+The generated in-game script then does, deterministically:
+
+```lua
+AudioPlayer → AudioChannelSplitter (take "Right" only)
+            → AudioChannelMixer    (spread to both ears)
+            → 4 × AudioEqualizer   (+40 dB restore)
+            → AudioDeviceOutput
+```
+
+- **Preview / moderation / any plain player**: hears the bait — a soft chime by default, or your own audio file (`--bait funnyvoice.mp3` / GUI "Bait audio" row), looped to cover the whole song and level-normalized.
+- **In game**: the script drops the bait channel entirely and restores the song.
+- Because channel selection happens through the Audio API wire graph (not the legacy 3D downmix), it works the same for 2D and 3D setups.
+- **Proof files before uploading:** play the output file normally = what the preview hears (bait); play `<song>_test_ingame.wav` = what the game hears (restored song).
+- Measured on a 30s song: bait at −19.8 dB on the left, masked song 37 dB beneath it, restored song at −17.7 dB in-game.
+
+```bat
+:: default: generated soft chime as the bait
+python coolin_cli.py song.mp3 -m bait
+
+:: use your own decoy audio
+python coolin_cli.py song.mp3 -m bait --bait innocent_clip.mp3
+```
 
 ### The `eqmask` method — inaudible in the preview, restored in-game (recommended for hiding)
 

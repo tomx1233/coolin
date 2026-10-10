@@ -27,6 +27,7 @@ METHOD_CHUNKED = "chunked"
 METHOD_SINGLE = "single"
 METHOD_MONOGATE = "monogate"
 METHOD_EQMASK = "eqmask"
+METHOD_BAIT = "bait"
 SUPPORTED_METHODS = (
     METHOD_INVERT,
     METHOD_SPEED,
@@ -36,6 +37,7 @@ SUPPORTED_METHODS = (
     METHOD_SINGLE,
     METHOD_MONOGATE,
     METHOD_EQMASK,
+    METHOD_BAIT,
 )
 
 # eqmask: how deeply the low+mid bands are cut at encode (dB).  Roblox's
@@ -200,6 +202,7 @@ def craft(
     speed_factor: Optional[float] = None,
     chunk_format: str = "auto",
     mask_depth: float = 18.0,
+    bait_path: Optional[str] = None,
     log: Callable[[str], None] = print,
     *,
     duration_seconds: Optional[float] = None,
@@ -245,6 +248,16 @@ def craft(
       CAVEAT: relies on Roblox's 3D mono downmix actually SUMMING channels -
       newer engine versions keep 3D sounds directional/stereo, which breaks
       this.  Use 'eqmask' instead: it does not depend on channel handling.
+    - 'bait': The decoy method.  LEFT channel carries a clean, innocent BAIT
+      sound (an audio file of your choice via bait_path, looped to cover the
+      song, or a generated soft chime); RIGHT channel carries the song with
+      the eqmask spectral cut (faint >4 kHz sizzle).  The Roblox preview /
+      any plain player hears ONLY the bait.  In game, the generated script
+      (new Audio API) selects only the RIGHT channel via
+      AudioChannelSplitter, spreads it to both ears with AudioChannelMixer,
+      and restores the song with the chained AudioEqualizers.  Deterministic
+      channel selection - no reliance on legacy 3D downmix behavior.
+      FLAC when it fits 20 MB, else 320 kbps MP3; same 6:58 cap.
     - 'eqmask': Spectral mask - the robust replacement for 'monogate'.  At
       encode time everything below ~4 kHz is cut by 40 dB, so the preview /
       moderation hears only faint >4 kHz sizzle (no vocals, no melody -
@@ -869,6 +882,160 @@ def craft(
             "",
             "local prev = player",
             f"for i = 1, LAYERS do",
+            '\tlocal eq = Instance.new("AudioEqualizer")',
+            f"\teq.MidRange = NumberRange.new({int(EQMASK_LOW_HZ)}, {int(EQMASK_HIGH_HZ)})",
+            f"\teq.MidGain = 10   -- max per instance; LAYERS of these reach +{EQMASK_CUT_DB:.0f} dB",
+            "\teq.LowGain = 10",
+            "\teq.Parent = script",
+            "\twireUp(prev, eq)",
+            "\tprev = eq",
+            "end",
+            "",
+            'local output = Instance.new("AudioDeviceOutput")',
+            "output.Parent = script",
+            "wireUp(prev, output)",
+            "",
+            "player:Play()",
+        ]
+        in_game_script = "\n".join(script_lines) + "\n"
+    elif method == METHOD_BAIT:
+        # Decoy method: L = bait (clean), R = spectrally masked song.  The
+        # preview plays the bait; the generated in-game script selects the
+        # RIGHT channel (AudioChannelSplitter + Wire.SourceName) and restores
+        # the song with the chained AudioEqualizers.
+        cut_filter, restore_filter = eqmask_filters()
+        full_dur = total_dur if total_dur else song_max
+        cap = min(target_seconds, SINGLE_MAX_SECONDS)
+        encode_dur = full_dur
+        if full_dur > cap:
+            log(
+                f"[3/4] Bait Method: song is {ogg_util.format_seconds(full_dur)}; "
+                f"trimming to {ogg_util.format_seconds(cap)} (single-asset platform limit; "
+                f"use -m chunked to keep the whole song)."
+            )
+            encode_dur = cap
+        bait_desc = (
+            f"bait file {os.path.basename(bait_path)}"
+            if bait_path else "generated soft chime"
+        )
+        log(
+            f"[3/4] Bait Method: LEFT = {bait_desc} (what the preview plays), "
+            f"RIGHT = song cut {EQMASK_CUT_DB:.0f} dB below 4 kHz "
+            f"(restored in game by the generated script)..."
+        )
+
+        out_dir = os.path.dirname(output_path) or "."
+        out_base = os.path.splitext(os.path.basename(output_path))[0]
+        if out_base.lower().endswith(OUTPUT_SUFFIX):
+            out_base = out_base[: -len(OUTPUT_SUFFIX)]
+        out_base = sanitize_asset_name(out_base, MAX_ASSET_NAME_LENGTH)
+
+        encoder = ""
+        chosen_path = None
+        last_error: Exception | None = None
+        for fmt in SINGLE_FORMATS:
+            path = os.path.join(out_dir, f"{out_base}.{fmt}")
+            if os.path.normcase(path) == os.path.normcase(input_path):
+                path = os.path.join(out_dir, f"{out_base}_bait.{fmt}")
+            try:
+                encoder = ffmpeg_util.convert_bait(
+                    exe, input_path, path, fmt=fmt, duration=encode_dur,
+                    bait_path=bait_path, cut_filter=cut_filter, log=log,
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+            if os.path.getsize(path) <= MAX_UPLOAD_BYTES:
+                chosen_path = path
+                break
+            try:
+                os.remove(path)  # too big; next rung
+            except OSError:
+                pass
+        if chosen_path is None:
+            raise RuntimeError(
+                f"Could not encode the song under the 20 MB upload limit: {last_error}"
+            )
+
+        # Proof file: exactly what the in-game script produces (RIGHT channel
+        # selected + inverse EQ applied locally).
+        test_path = os.path.join(out_dir, f"{out_base}_test_ingame.wav")
+        try:
+            ffmpeg_util.convert_segment(
+                exe, chosen_path, test_path, fmt="wav",
+                duration=min(10.0, encode_dur),
+                audio_filter=f"pan=mono|c0=c1,{restore_filter}",
+                log=lambda _: None,
+            )
+        except RuntimeError:
+            test_path = ""
+
+        output_path = chosen_path
+        out_codec = "flac" if chosen_path.endswith(".flac") else "mp3"
+        declared_seconds = ffmpeg_util.probe_duration(exe, chosen_path) or encode_dur
+        actual_seconds = declared_seconds
+        size_mb = os.path.getsize(chosen_path) / 1_000_000
+        log(
+            f"      Wrote {chosen_path} [{out_codec.upper()} | "
+            f"{ogg_util.format_seconds(declared_seconds)} | {size_mb:.2f} MB]"
+        )
+        log(
+            f"      Preview hears: the {bait_desc} (left channel).  Play "
+            f"{os.path.basename(chosen_path)} normally to check it."
+        )
+        if test_path:
+            log(
+                f"      Proof file: {test_path}  <- play this: it is (approximately) what "
+                f"your game hears (right channel + EQ restore)."
+            )
+        log(
+            "      In game, use the generated script (new Audio API): it drops the "
+            "bait channel and restores the song.  2D or 3D both work."
+        )
+
+        script_lines = [
+            "-- Coolin Bait Song Player (generated)",
+            "-- LEFT channel of the asset = bait decoy; RIGHT channel = the real song",
+            f"-- (cut {EQMASK_CUT_DB:.0f} dB below 4 kHz).  This script drops the bait,",
+            f"-- selects the RIGHT channel, and restores the song with "
+            f"{EQMASK_LAYERS} AudioEqualizers.",
+            "-- 1) Upload the output file and put its asset ID below.",
+            "-- 2) Put this Script anywhere (SoundService or a Part - 2D/3D both work).",
+            "",
+            'local ASSET_ID = "rbxassetid://0" -- your uploaded asset ID',
+            f"local LAYERS = {EQMASK_LAYERS}           -- equalizer layers x (+10 dB each) = +{EQMASK_CUT_DB:.0f} dB restore",
+            "local VOLUME = 0.5          -- raise/lower to taste",
+            "",
+            'local player = Instance.new("AudioPlayer")',
+            "player.AssetId = ASSET_ID",
+            "player.Volume = VOLUME",
+            "player.Parent = script",
+            "",
+            "local function wireUp(source, target, sourceName, targetName)",
+            '\tlocal wire = Instance.new("Wire")',
+            "\twire.SourceInstance = source",
+            "\twire.TargetInstance = target",
+            "\tif sourceName then wire.SourceName = sourceName end",
+            "\tif targetName then wire.TargetName = targetName end",
+            "\twire.Parent = target",
+            "\treturn wire",
+            "end",
+            "",
+            "-- Drop the bait (LEFT); take only the song (RIGHT).",
+            'local splitter = Instance.new("AudioChannelSplitter")',
+            "splitter.Layout = Enum.AudioChannelLayout.Stereo",
+            "splitter.Parent = script",
+            "wireUp(player, splitter)",
+            "",
+            "-- Spread the song to both ears.",
+            'local mixer = Instance.new("AudioChannelMixer")',
+            "mixer.Layout = Enum.AudioChannelLayout.Stereo",
+            "mixer.Parent = script",
+            'wireUp(splitter, mixer, "Right", "Left")',
+            'wireUp(splitter, mixer, "Right", "Right")',
+            "",
+            "local prev = mixer",
+            "for i = 1, LAYERS do",
             '\tlocal eq = Instance.new("AudioEqualizer")',
             f"\teq.MidRange = NumberRange.new({int(EQMASK_LOW_HZ)}, {int(EQMASK_HIGH_HZ)})",
             f"\teq.MidGain = 10   -- max per instance; LAYERS of these reach +{EQMASK_CUT_DB:.0f} dB",

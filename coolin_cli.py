@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-m", "--method",
-        choices=("single", "chunked", "eqmask", "monogate", "invert", "speed", "invert_speed", "multistream"),
+        choices=("single", "chunked", "eqmask", "bait", "monogate", "invert", "speed", "invert_speed", "multistream"),
         default=pipeline.METHOD_SINGLE,
         help=(
             "conversion method: 'single' (ONE clean asset at original pitch & speed - lossless "
@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
             "'eqmask' (RECOMMENDED for hiding: everything below 4 kHz is cut 40 dB, so the "
             "preview hears only faint sizzle - in game a chained AudioEqualizer script restores "
             "the song; works for any channel handling, unlike monogate), "
+            "'bait' (decoy: LEFT channel plays a clean bait sound - your own file via --bait or "
+            "a generated chime - while the RIGHT channel hides the spectrally masked song; the "
+            "generated in-game script drops the bait channel and restores the song), "
             "'monogate' (masked in STEREO via anti-correlated noise; relies on Roblox's 3D "
             "mono downmix summing channels, which newer engine versions may not do - prefer "
             "'eqmask'), "
@@ -64,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Sound.PlaybackSpeed), 'invert_speed' (both), 'multistream' (chained OGG for the "
             "Discord preview trick). Default: single"
         ),
+    )
+    parser.add_argument(
+        "--bait", metavar="AUDIO",
+        help="audio file to use as the bait/decoy for the 'bait' method (looped to cover "
+             "the song; default: a generated soft chime)",
     )
     parser.add_argument(
         "--mask-depth", type=float, default=18.0, metavar="DB",
@@ -119,7 +127,7 @@ def main(argv=None) -> int:
             if args.method == pipeline.METHOD_CHUNKED:
                 raw_seconds = pipeline.DEFAULT_CHUNK_SECONDS
             elif args.method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
-                                 pipeline.METHOD_EQMASK):
+                                 pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT):
                 raw_seconds = pipeline.SINGLE_MAX_SECONDS
             else:
                 raw_seconds = pipeline.DEFAULT_FAKE_SECONDS
@@ -143,6 +151,7 @@ def main(argv=None) -> int:
                 speed_factor=args.speed_factor,
                 chunk_format=args.chunk_format,
                 mask_depth=args.mask_depth,
+                bait_path=args.bait,
                 asset_name=args.asset_name,
             )
         except Exception as exc:

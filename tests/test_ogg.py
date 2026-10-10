@@ -413,6 +413,72 @@ class OggCraftingTest(unittest.TestCase):
         self.assertIn(f"LAYERS = {pipeline.EQMASK_LAYERS}", res.in_game_script)
         self.assertIn("for i = 1, LAYERS do", res.in_game_script)
 
+    def test_bait_method_preview_hears_bait_game_hears_song(self):
+        """Bait method: LEFT channel = clean bait, RIGHT channel = spectrally
+        masked song.  The plain (preview) mix is bait-dominant; the in-game
+        proof (right channel + EQ restore) recovers the song."""
+        out_path = os.path.join(self.tmpdir.name, "bait_out", "tone.ogg")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="bait",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             log=lambda _: None)
+        self.assertTrue(res.output_path.endswith((".flac", ".mp3")))
+        self.assertLess(os.path.getsize(res.output_path), pipeline.MAX_UPLOAD_BYTES)
+
+        mid_band = "highpass=f=300,lowpass=f=3000"
+        # LEFT channel: the bait (loud, mid-band present).
+        left = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], f"pan=mono|c0=c0,{mid_band}")
+        # RIGHT channel: the masked song (mid-band ~40 dB below the original).
+        right = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", res.output_path], f"pan=mono|c0=c1,{mid_band}")
+        orig_mid = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", self.wav_path], mid_band)
+        self.assertIsNotNone(left)
+        self.assertIsNotNone(right)
+        self.assertIsNotNone(orig_mid)
+        # The bait is clearly audible...
+        self.assertGreater(left, -35.0)
+        # ...while the song's mid band is buried ~EQMASK_CUT_DB deep on the right.
+        self.assertGreater(orig_mid - right, pipeline.EQMASK_CUT_DB - 8.0)
+        self.assertLess(orig_mid - right, pipeline.EQMASK_CUT_DB + 8.0)
+        # The bait masks it: left channel dominates the plain stereo mix.
+        self.assertGreater(left - right, 15.0)
+
+        # Proof file: right channel + inverse EQ ~= the original song.
+        stem = os.path.splitext(res.output_path)[0]
+        test_path = stem + "_test_ingame.wav"
+        self.assertTrue(os.path.isfile(test_path))
+        restored_mid = ffmpeg_util.probe_mean_volume(
+            self.ffmpeg, ["-i", test_path], mid_band)
+        self.assertIsNotNone(restored_mid)
+        self.assertAlmostEqual(restored_mid, orig_mid, delta=4.0)
+
+        # Script: deterministic channel selection + EQ restore.
+        self.assertIn("AudioChannelSplitter", res.in_game_script)
+        self.assertIn('"Right", "Left"', res.in_game_script)
+        self.assertIn("AudioChannelMixer", res.in_game_script)
+        self.assertIn("MidGain = 10", res.in_game_script)
+
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+
+    def test_bait_method_with_custom_bait_file(self):
+        """Supplying a bait file uses it on the left channel."""
+        bait_wav = os.path.join(self.tmpdir.name, "bait.wav")
+        make_tone_wav(bait_wav, seconds=1.0, rate=22050)
+        out_path = os.path.join(self.tmpdir.name, "bait_out", "custom.ogg")
+        log_lines = []
+        res = pipeline.craft(self.wav_path, output_path=out_path, method="bait",
+                             fake_seconds=pipeline.SINGLE_MAX_SECONDS,
+                             bait_path=bait_wav, log=log_lines.append)
+        self.assertTrue(os.path.isfile(res.output_path))
+        self.assertTrue(any("bait file bait.wav" in line for line in log_lines))
+        probed = ffmpeg_util.probe_duration(self.ffmpeg, res.output_path)
+        self.assertIsNotNone(probed)
+        self.assertAlmostEqual(probed, TONE_SECONDS, delta=0.5)
+
     def test_single_method_one_clean_asset(self):
         """Single method: ONE clean file at original pitch & speed - lossless
         FLAC when it fits, under the 7:00 limit and the 20 MB size limit."""

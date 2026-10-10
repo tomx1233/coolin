@@ -192,6 +192,93 @@ def convert_segment(
     return codec
 
 
+def convert_bait(
+    exe: str,
+    input_path: str,
+    output_path: str,
+    fmt: str = "flac",
+    duration: Optional[float] = None,
+    bait_path: Optional[str] = None,
+    cut_filter: str = "",
+    log=print,
+) -> str:
+    """Encode a 'bait' asset: LEFT channel = bait, RIGHT channel = song with
+    the spectral mask applied (low+mid cut).
+
+    The Roblox preview / any plain player hears the bait (the masked song is
+    faint >4 kHz sizzle under it).  The generated in-game script selects only
+    the RIGHT channel with an AudioChannelSplitter and restores the song with
+    chained AudioEqualizers.
+
+    *bait_path*: an audio file to use as the bait (looped to cover the song);
+    when None, a soft generated chime is used.  Returns the codec used.
+    """
+    bait_target_rms = -20.0
+    if bait_path:
+        bait_rms = probe_mean_volume(
+            exe, ["-i", bait_path],
+            "aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1")
+        if bait_rms is None:
+            bait_rms = -20.0
+        bait_gain = bait_target_rms - bait_rms
+        bait_input = ["-stream_loop", "-1", "-i", bait_path]
+        bait_chain = (
+            "[1:a]aresample=48000,aformat=channel_layouts=stereo,"
+            "pan=mono|c0=0.5*c0+0.5*c1"
+            f",volume={bait_gain:.2f}dB[bait]"
+        )
+    else:
+        # Generated default bait: a soft pulsing chime, normalized to the
+        # target level (sine source amplitude differs across ffmpeg builds,
+        # so measure a sample and compute the exact gain).
+        noise_dur = (duration + 1.0) if duration is not None else 720.0
+        chime_probe = "sine=frequency=660:sample_rate=48000:duration=3"
+        chime_rms = probe_mean_volume(
+            exe, ["-f", "lavfi", "-i", chime_probe], "tremolo=f=0.6:d=0.4")
+        if chime_rms is None:
+            chime_rms = -23.0
+        bait_gain = bait_target_rms - chime_rms
+        bait_input = ["-f", "lavfi", "-i",
+                      f"sine=frequency=660:sample_rate=48000:"
+                      f"duration={noise_dur:.2f}"]
+        bait_chain = f"[1:a]tremolo=f=0.6:d=0.4,volume={bait_gain:.2f}dB[bait]"
+
+    graph = (
+        "[0:a]aresample=48000,aformat=channel_layouts=stereo,"
+        "pan=mono|c0=0.5*c0+0.5*c1"
+        + (f",{cut_filter}" if cut_filter else "")
+        + "[song];"
+        + bait_chain + ";"
+        "[bait][song]join=inputs=2:channel_layout=stereo,"
+        "alimiter=limit=0.98[out]"
+    )
+    if fmt == "flac":
+        codec_args = ["-c:a", "flac", "-compression_level", "8", "-ar", "48000"]
+        codec = "flac"
+    elif fmt == "mp3":
+        codec_args = ["-c:a", "libmp3lame", "-b:a", "320k", "-ar", "48000"]
+        codec = "libmp3lame"
+    else:
+        raise ValueError(f"bait supports flac or mp3, got {fmt!r}")
+    duration_args = ["-t", str(duration)] if duration is not None else []
+    cmd = (
+        [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+        + ["-i", input_path]
+        + bait_input
+        + ["-filter_complex", graph, "-map", "[out]"]
+        + duration_args
+        + codec_args
+        + [output_path]
+    )
+    log(f"ffmpeg: {' '.join(_quote(arg) for arg in cmd)}")
+    result = _run(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg failed to convert the input file:\n" + result.stderr.strip()
+        )
+    return codec
+
+
 def probe_mean_volume(exe: str, input_args: Sequence[str], audio_filter: str) -> Optional[float]:
     """Mean (RMS) volume in dB of an input (file or lavfi source) after
     applying *audio_filter*.  Returns None if volumedetect reports nothing."""

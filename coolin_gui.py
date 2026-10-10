@@ -100,28 +100,38 @@ class CoolinApp(tk.Tk):
         ttk.Label(options_frame, text="max 50 chars (Roblox/Discord limit)").grid(
             row=2, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
-        ttk.Label(options_frame, text="Method:").grid(
+        ttk.Label(options_frame, text="Bait audio (optional):").grid(
             row=3, column=0, sticky="w", padx=8, pady=(4, 4))
+        self.bait_path_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=self.bait_path_var).grid(
+            row=3, column=1, sticky="ew", padx=4, pady=(4, 4))
+        ttk.Button(options_frame, text="Browse...",
+                   command=self.on_browse_bait).grid(
+            row=3, column=2, padx=(4, 8), pady=(4, 4))
+
+        ttk.Label(options_frame, text="Method:").grid(
+            row=4, column=0, sticky="w", padx=8, pady=(4, 4))
         self.method_var = tk.StringVar(value=pipeline.METHOD_SINGLE)
         ttk.Combobox(options_frame, textvariable=self.method_var, width=32,
                      values=(
                          pipeline.METHOD_SINGLE,
                          pipeline.METHOD_CHUNKED,
                          pipeline.METHOD_EQMASK,
+                         pipeline.METHOD_BAIT,
                          pipeline.METHOD_MONOGATE,
                          pipeline.METHOD_INVERT,
                          pipeline.METHOD_SPEED,
                          pipeline.METHOD_INVERT_SPEED,
                          pipeline.METHOD_MULTISTREAM,
                      ),
-                     state="readonly").grid(row=3, column=1, sticky="w", padx=4, pady=(4, 4))
+                     state="readonly").grid(row=4, column=1, sticky="w", padx=4, pady=(4, 4))
         ttk.Label(options_frame, text="single = ONE asset, original pitch & speed (best)").grid(
-            row=3, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
+            row=4, column=2, sticky="w", padx=(4, 8), pady=(4, 4))
 
         ttk.Label(options_frame, text="Per-chunk / Discord duration (max 6:59):").grid(
-            row=4, column=0, sticky="w", padx=8, pady=(4, 8))
+            row=5, column=0, sticky="w", padx=8, pady=(4, 8))
         controls = ttk.Frame(options_frame)
-        controls.grid(row=4, column=1, columnspan=2, sticky="w",
+        controls.grid(row=5, column=1, columnspan=2, sticky="w",
                       padx=4, pady=(4, 8))
         self.seconds_var = tk.StringVar()
         self._default_seconds_for_method(self.method_var.get())
@@ -171,7 +181,7 @@ class CoolinApp(tk.Tk):
         if method == pipeline.METHOD_CHUNKED:
             default = pipeline.DEFAULT_CHUNK_SECONDS
         elif method in (pipeline.METHOD_SINGLE, pipeline.METHOD_MONOGATE,
-                        pipeline.METHOD_EQMASK):
+                        pipeline.METHOD_EQMASK, pipeline.METHOD_BAIT):
             default = pipeline.SINGLE_MAX_SECONDS
         else:
             default = pipeline.DEFAULT_FAKE_SECONDS
@@ -240,6 +250,13 @@ class CoolinApp(tk.Tk):
     def on_clear_files(self) -> None:
         self.file_listbox.delete(0, "end")
 
+    def on_browse_bait(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Choose the bait audio file", filetypes=AUDIO_FILETYPES
+        )
+        if path:
+            self.bait_path_var.set(path)
+
     def on_browse_output(self) -> None:
         chosen = filedialog.askdirectory(title="Choose output folder")
         if chosen:
@@ -278,13 +295,13 @@ class CoolinApp(tk.Tk):
             args=(files, seconds, self.codec_var.get(),
                   self.same_folder_var.get(), self.output_dir_var.get().strip(),
                   raw_asset_name, self.method_var.get(),
-                  self.mask_depth_var.get()),
+                  self.mask_depth_var.get(), self.bait_path_var.get().strip()),
             daemon=True,
         )
         self.worker.start()
 
     # -------------------------------------------------------------- worker
-    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth) -> None:
+    def _worker(self, files, seconds, codec, same_folder, output_dir, asset_name, method, mask_depth, bait_path) -> None:
         try:
             mask_depth = float(mask_depth)
         except (TypeError, ValueError):
@@ -313,6 +330,7 @@ class CoolinApp(tk.Tk):
                     codec=codec,
                     method=method,
                     mask_depth=mask_depth,
+                    bait_path=bait_path or None,
                     asset_name=single_name,
                     log=self.log_queue.put,
                 )
